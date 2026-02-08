@@ -157,18 +157,37 @@ fn map_maxspeed(segment: &mut Segment) {
 }
 
 /// Map oneway status
+///
+/// Matches Python behavior (lines 514-520):
+/// - F_ForbjudenFardriktning=1: forward direction forbidden → reverse geometry, set oneway=yes
+/// - B_ForbjudenFardriktning=1: backward direction forbidden → set oneway=yes (geometry correct)
 fn map_oneway(segment: &mut Segment) {
-    // Check Korfa_524 (Körfältsanvändning)
-    if let Some(korfa) = segment.properties.get("Korfa_524").and_then(|v| v.as_i64()) {
-        if korfa == 1 {
-            segment.tags.insert("oneway".to_string(), "yes".to_string());
-        }
-    }
-    
-    // Check direction of travel restrictions
-    if segment.properties.get("F_ForbjudenFardriktning").and_then(|v| v.as_i64()) == Some(1) {
-        // One direction forbidden - implies oneway
+    use crate::models::hash_coord;
+
+    // Check direction of travel restrictions first (takes priority)
+    let f_forbidden = segment.properties.get("F_ForbjudenFardriktning")
+        .and_then(|v| v.as_i64()) == Some(1);
+    let b_forbidden = segment.properties.get("B_ForbjudenFardriktning")
+        .and_then(|v| v.as_i64()) == Some(1);
+
+    if f_forbidden && !b_forbidden {
+        // Forward direction forbidden → reverse geometry so oneway=yes follows correct direction
+        segment.geometry.0.reverse();
+        segment.start_node = hash_coord(segment.geometry.0.first().unwrap());
+        segment.end_node = hash_coord(segment.geometry.0.last().unwrap());
         segment.tags.insert("oneway".to_string(), "yes".to_string());
+    } else if b_forbidden && !f_forbidden {
+        // Backward direction forbidden → geometry already points in correct direction
+        segment.tags.insert("oneway".to_string(), "yes".to_string());
+    }
+
+    // Check Korfa_524 (Körfältsanvändning) only if oneway not already set
+    if !segment.tags.contains_key("oneway") {
+        if let Some(korfa) = segment.properties.get("Korfa_524").and_then(|v| v.as_i64()) {
+            if korfa == 1 {
+                segment.tags.insert("oneway".to_string(), "yes".to_string());
+            }
+        }
     }
 }
 

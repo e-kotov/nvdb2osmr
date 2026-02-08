@@ -288,9 +288,17 @@ fn process_nvdb_wkb(
             continue;
         };
         
-        // Parse WKB
+        // Parse WKB and round coordinates to 7 decimal places
+        // Matches Python's coordinate_decimals = 7 (py-script.py:2223-2225)
+        // This ensures segment endpoints at shared junctions produce identical hashes
         let geometry = match parse_wkb(&wkb_bytes) {
-            Some(geom) => geom,
+            Some(mut geom) => {
+                for coord in geom.0.iter_mut() {
+                    coord.x = (coord.x * 10_000_000.0).round() / 10_000_000.0;
+                    coord.y = (coord.y * 10_000_000.0).round() / 10_000_000.0;
+                }
+                geom
+            }
             None => {
                 eprintln!("Failed to parse WKB for geometry {}", i);
                 continue;
@@ -446,38 +454,47 @@ fn write_pbf_three_pass(
     
     // Pass 2: Write internal nodes for each segment
     // Internal nodes are all coordinates except start and end
-    // First, collect all (seg_idx, coord) pairs that need nodes
-    let mut internal_node_data: Vec<(usize, Vec<Coord>)> = Vec::new();
+    // If an internal coordinate matches a junction (from Pass 1), reuse its ID
+    // First, collect all (seg_idx, coord, maybe_junction_id) tuples
+    let mut internal_node_data: Vec<(usize, Vec<(Coord, Option<i64>)>)> = Vec::new();
     for way in ways {
         for &seg_idx in &way.segment_indices {
             let seg = &segments[seg_idx];
-            let coords: Vec<Coord> = seg.internal_coords().iter().copied().collect();
+            let coords: Vec<(Coord, Option<i64>)> = seg.internal_coords().iter().map(|c| {
+                let h = models::hash_coord(c);
+                (*c, junction_ids.get(&h).copied())
+            }).collect();
             internal_node_data.push((seg_idx, coords));
         }
     }
-    
+
     // Now process each segment's internal nodes
     for (seg_idx, coords) in internal_node_data {
         let seg = &mut segments[seg_idx];
         seg.internal_node_ids.clear();
-        
-        for coord in coords {
-            let id = node_id;
-            node_id += 1;
-            seg.internal_node_ids.push(id);
-            
-            let node = Node {
-                id,
-                latitude: deg_to_nanodeg(coord.y),
-                longitude: deg_to_nanodeg(coord.x),
-                tags: vec![],
-                version: 0,
-                timestamp: None,
-                user: None,
-                changeset_id: 0,
-                visible: true,
-            };
-            let _ = writer.write(Element::Node(node));
+
+        for (coord, maybe_junction_id) in coords {
+            if let Some(junction_id) = maybe_junction_id {
+                // This internal coordinate is at a junction — reuse the junction node ID
+                seg.internal_node_ids.push(junction_id);
+            } else {
+                let id = node_id;
+                node_id += 1;
+                seg.internal_node_ids.push(id);
+
+                let node = Node {
+                    id,
+                    latitude: deg_to_nanodeg(coord.y),
+                    longitude: deg_to_nanodeg(coord.x),
+                    tags: vec![],
+                    version: 0,
+                    timestamp: None,
+                    user: None,
+                    changeset_id: 0,
+                    visible: true,
+                };
+                let _ = writer.write(Element::Node(node));
+            }
         }
     }
     

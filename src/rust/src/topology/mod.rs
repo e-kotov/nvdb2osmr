@@ -88,7 +88,7 @@ fn build_junctions(segments: &[Segment]) -> FxHashMap<CoordHash, Junction> {
 fn simplify_linear(
     segments: &[Segment],
     groups: &FxHashMap<String, Vec<usize>>,
-    _junctions: &FxHashMap<CoordHash, Junction>,
+    junctions: &FxHashMap<CoordHash, Junction>,
 ) -> Vec<Way> {
     let mut ways: Vec<Way> = Vec::new();
     
@@ -201,19 +201,39 @@ fn simplify_linear(
                 }
             }
             
-            // Create new ways, each with identical segment tags
-            // Matches Python lines 1697-1711
+            // First split at true junctions (3+ segments meeting across ALL groups)
+            // This ensures intersections are represented as way endpoints for OSRM
+            let mut junction_split_chains: Vec<Vec<usize>> = Vec::new();
             if !way.is_empty() {
-                let mut current_way = vec![way[0]];
-                let mut current_tags = segments[way[0]].tags.clone();
-                
-                for &seg_idx in &way[1..] {
+                let mut current_chunk: Vec<usize> = Vec::new();
+                for (i, &seg_idx) in way.iter().enumerate() {
+                    current_chunk.push(seg_idx);
+                    if i < way.len() - 1 {
+                        let seg = &segments[seg_idx];
+                        if let Some(j) = junctions.get(&seg.end_node) {
+                            if j.segment_indices.len() >= 3 {
+                                junction_split_chains.push(current_chunk);
+                                current_chunk = Vec::new();
+                            }
+                        }
+                    }
+                }
+                if !current_chunk.is_empty() {
+                    junction_split_chains.push(current_chunk);
+                }
+            }
+
+            // Then split each sub-chain by tags
+            // Matches Python lines 1697-1711
+            for chain in junction_split_chains {
+                let mut current_way = vec![chain[0]];
+                let mut current_tags = segments[chain[0]].tags.clone();
+
+                for &seg_idx in &chain[1..] {
                     let seg = &segments[seg_idx];
                     if seg.tags == current_tags {
-                        // Same tags, add to current way
                         current_way.push(seg_idx);
                     } else {
-                        // Tags changed, finish current way and start new one
                         ways.push(Way {
                             segment_indices: current_way,
                             tags: current_tags,
@@ -222,8 +242,7 @@ fn simplify_linear(
                         current_tags = seg.tags.clone();
                     }
                 }
-                
-                // Don't forget the last way
+
                 if !current_way.is_empty() {
                     ways.push(Way {
                         segment_indices: current_way,
