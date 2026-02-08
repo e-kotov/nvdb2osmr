@@ -128,7 +128,11 @@ fn parse_wkb(wkb: &[u8]) -> Option<LineString<f64>> {
         return None;
     }
     
-    let little_endian = wkb[0] == 1;
+    let byte_order = wkb[0];
+    if byte_order > 1 {
+        return None;
+    }
+    let little_endian = byte_order == 1;
     
     let geom_type = if little_endian {
         u32::from_le_bytes([wkb[1], wkb[2], wkb[3], wkb[4]])
@@ -136,15 +140,29 @@ fn parse_wkb(wkb: &[u8]) -> Option<LineString<f64>> {
         u32::from_be_bytes([wkb[1], wkb[2], wkb[3], wkb[4]])
     };
     
-    // WKB geometry types (base types without Z/M flags)
-    // 2D: 1-7, Z: 1001-1007, M: 2001-2007, ZM: 3001-3007
-    let base_type = geom_type % 1000;
-    let has_z = (geom_type / 1000) == 1 || (geom_type / 1000) == 3;
-    let has_m = (geom_type / 1000) == 2 || (geom_type / 1000) == 3;
+    // Handle EWKB flags (PostGIS style)
+    let has_srid = (geom_type & 0x20000000) != 0;
+    let ewkb_z = (geom_type & 0x80000000) != 0;
+    let ewkb_m = (geom_type & 0x40000000) != 0;
+    
+    // Mask out EWKB flags for base type and ISO-style Z/M
+    let clean_geom_type = geom_type & 0x1FFFFFFF;
+    
+    let base_type = clean_geom_type % 1000;
+    let iso_z = (clean_geom_type / 1000) == 1 || (clean_geom_type / 1000) == 3;
+    let iso_m = (clean_geom_type / 1000) == 2 || (clean_geom_type / 1000) == 3;
+    
+    let has_z = ewkb_z || iso_z;
+    let has_m = ewkb_m || iso_m;
     let coord_size = 16 + if has_z { 8 } else { 0 } + if has_m { 8 } else { 0 };
     
+    let mut offset = 5;
+    if has_srid {
+        offset += 4;
+    }
+    
     match base_type {
-        2 => parse_linestring_wkb(wkb, 5, little_endian, coord_size),
+        2 => parse_linestring_wkb(wkb, offset, little_endian, coord_size),
         5 => parse_multilinestring_wkb(wkb, little_endian, coord_size),
         _ => None,
     }
@@ -182,7 +200,7 @@ fn parse_linestring_wkb(wkb: &[u8], offset: usize, little_endian: bool, coord_si
 }
 
 fn parse_multilinestring_wkb(wkb: &[u8], little_endian: bool, _coord_size: usize) -> Option<LineString<f64>> {
-    if wkb.len() < 14 {
+    if wkb.len() < 9 {
         return None;
     }
     
@@ -201,12 +219,15 @@ fn parse_multilinestring_wkb(wkb: &[u8], little_endian: bool, _coord_size: usize
     // Each geometry in MultiLineString is: byte_order (1) + type (4) + num_points (4) + points
     // Skip to first geometry: offset 9 (after num_geoms)
     let geom_start = 9;
-    if wkb.len() < geom_start + 9 {
+    if wkb.len() < geom_start + 5 {
         return None;
     }
     
     // Verify it's a LineString
     let geom_byte_order = wkb[geom_start];
+    if geom_byte_order > 1 {
+        return None;
+    }
     let geom_little_endian = geom_byte_order == 1;
     let geom_type = if geom_little_endian {
         u32::from_le_bytes([wkb[geom_start+1], wkb[geom_start+2], wkb[geom_start+3], wkb[geom_start+4]])
@@ -214,18 +235,30 @@ fn parse_multilinestring_wkb(wkb: &[u8], little_endian: bool, _coord_size: usize
         u32::from_be_bytes([wkb[geom_start+1], wkb[geom_start+2], wkb[geom_start+3], wkb[geom_start+4]])
     };
     
-    // Accept LineString (2) or LineString Z/M variants
-    let base_geom_type = geom_type % 1000;
+    // Handle EWKB flags for inner geom
+    let inner_has_srid = (geom_type & 0x20000000) != 0;
+    let inner_ewkb_z = (geom_type & 0x80000000) != 0;
+    let inner_ewkb_m = (geom_type & 0x40000000) != 0;
+    
+    let clean_geom_type = geom_type & 0x1FFFFFFF;
+    let base_geom_type = clean_geom_type % 1000;
+    
     if base_geom_type != 2 {
         return None;
     }
     
-    // Check if the inner geometry has different Z/M flags
-    let inner_has_z = (geom_type / 1000) == 1 || (geom_type / 1000) == 3;
-    let inner_has_m = (geom_type / 1000) == 2 || (geom_type / 1000) == 3;
-    let inner_coord_size = 16 + if inner_has_z { 8 } else { 0 } + if inner_has_m { 8 } else { 0 };
+    let iso_z = (clean_geom_type / 1000) == 1 || (clean_geom_type / 1000) == 3;
+    let iso_m = (clean_geom_type / 1000) == 2 || (clean_geom_type / 1000) == 3;
+    let has_z = inner_ewkb_z || iso_z;
+    let has_m = inner_ewkb_m || iso_m;
     
-    parse_linestring_wkb(wkb, geom_start + 5, geom_little_endian, inner_coord_size)
+    let inner_coord_size = 16 + if has_z { 8 } else { 0 } + if has_m { 8 } else { 0 };
+    let mut inner_offset = geom_start + 5;
+    if inner_has_srid {
+        inner_offset += 4;
+    }
+    
+    parse_linestring_wkb(wkb, inner_offset, geom_little_endian, inner_coord_size)
 }
 
 fn read_f64(bytes: &[u8], little_endian: bool) -> f64 {
@@ -289,8 +322,6 @@ fn process_nvdb_wkb(
         };
         
         // Parse WKB and round coordinates to 7 decimal places
-        // Matches Python's coordinate_decimals = 7 (py-script.py:2223-2225)
-        // This ensures segment endpoints at shared junctions produce identical hashes
         let geometry = match parse_wkb(&wkb_bytes) {
             Some(mut geom) => {
                 for coord in geom.0.iter_mut() {
@@ -300,10 +331,14 @@ fn process_nvdb_wkb(
                 geom
             }
             None => {
-                eprintln!("Failed to parse WKB for geometry {}", i);
+                if i < 5 || i % 1000 == 0 {
+                    let first_bytes: Vec<String> = wkb_bytes.iter().take(16).map(|b| format!("{:02X}", b)).collect();
+                    eprintln!("Failed to parse WKB for geometry {}. First 16 bytes: {}", i, first_bytes.join(" "));
+                }
                 continue;
             }
         };
+
         
         // Build segment
         let mut seg = Segment::new(format!("seg_{}", i), geometry);
