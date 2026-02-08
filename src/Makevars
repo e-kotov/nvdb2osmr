@@ -1,0 +1,26 @@
+TARGET_DIR = ./rust/target
+LIBDIR = $(TARGET_DIR)/release
+STATLIB = $(LIBDIR)/libnvdb2osmr.a
+PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr
+
+all: C_clean
+
+$(SHLIB): $(STATLIB)
+
+$(STATLIB):
+	# In some environments, ~/.cargo/bin might not be in PATH, so we need
+	# to set it here to ensure cargo can be found. See discussion in 
+	# https://github.com/extendr/rextendr/issues/145
+	export PATH="$(HOME)/.cargo/bin:$(PATH)" && \
+		if [ "$(NOT_CRAN)" != "true" ]; then \
+			export CARGO_HOME=$(CARGOTMP); \
+		fi && \
+		export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$(CARGO_LINKER)" && \
+		export LIBRARY_PATH="$(LIBRARY_PATH);$(MINGW_LIBS)" && \
+		cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
+
+C_clean:
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS)
+
+clean:
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR)

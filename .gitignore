@@ -47,3 +47,19 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+.Rproj.user
+
+# Rust/Cargo build artifacts
+src/rust/target/
+Cargo.lock
+*.so
+*.dll
+*.a
+*.o
+
+# Temporary OSM files
+*.osm
+*.osm.pbf
+
+# Cargo config (platform specific)
+src/.cargo/

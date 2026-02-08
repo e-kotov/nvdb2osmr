@@ -1,0 +1,32 @@
+[package]
+name = "pbf-craft-cli"
+version = "0.2.0"
+edition = "2021"
+authors = ["Lurker <cloverzero@gmail.com>"]
+repository = "https://github.com/cloverzero/pbf-craft"
+homepage = "https://github.com/cloverzero/pbf-craft"
+description = "A command-line utility for OpenStreetMap PBF file format."
+readme = "README.md"
+categories = ["encoding", "parser-implementations"]
+keywords = ["openstreetmap", "osm", "pbf", "protocolbuffer", "protobuf"]
+license = "MIT"
+
+[dependencies]
+anyhow = { version = "1.0", features = ["backtrace"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.3", features = ["derive"] }
+colored_json = "5.0.0"
+colour = "1.1.0"
+csv = "1.1.6"
+env_logger = "0.11.3"
+geo = "0.28.0"
+geojson = { version = "0.24.1", features = ["geo-types"] }
+pbf-craft = { path = "../pbf-craft" }
+postgres = { version = "0.19.4", features = ["with-chrono-0_4"] }
+postgres-types = { version = "0.2.4", features = ["derive"] }
+serde = { version = "1.0.142", features = ["derive"] }
+serde_json = "1.0.83"
+
+[[bin]]
+name = "pbf-craft"
+path = "src/main.rs"
