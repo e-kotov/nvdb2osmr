@@ -96,16 +96,57 @@ convert_to_geoparquet <- function(source_path, geoparquet_path, verbose = TRUE) 
   sweref99_tm <- "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
   wgs84 <- "+proj=longlat +datum=WGS84 +no_defs"
   
+  # Get available columns to detect geometry and handles EXCLUDE
+  all_cols <- DBI::dbGetQuery(con, sprintf("SELECT * FROM ST_Read('%s') LIMIT 0", source_path))
+  available_cols <- names(all_cols)
+  
+  # Auto-detect geometry column
+  geom_col <- NULL
+  if ("Shape" %in% available_cols) {
+    geom_col <- "Shape"
+  } else if ("geom" %in% available_cols) {
+    geom_col <- "geom"
+  } else {
+    # Try to find any geometry column
+    for (col in available_cols) {
+      test <- tryCatch({
+        DBI::dbGetQuery(con, sprintf("
+          SELECT ST_GeometryType(\"%s\") as gtype 
+          FROM ST_Read('%s') 
+          WHERE \"%s\" IS NOT NULL 
+          LIMIT 1
+        ", col, source_path, col))
+      }, error = function(e) NULL)
+      if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
+        geom_col <- col
+        break
+      }
+    }
+  }
+  
+  if (is.null(geom_col)) {
+    stop("Could not detect geometry column in source: ", source_path)
+  }
+
   # Build query - transform to WGS84 during conversion
-  # Note: ST_AsWKB is the correct function (not ST_AsBinary)
+  # Note: ST_AsWKB is used to ensure the Parquet file contains standard WKB blobs.
+  # We exclude the original geometry and Shape_Length if it exists.
+  exclude_list <- unique(c(geom_col, "Shape_Length"))
+  exclude_list <- exclude_list[exclude_list %in% available_cols]
+  exclude_clause <- if (length(exclude_list) > 0) {
+    sprintf("EXCLUDE(%s)", paste(sprintf('"%s"', exclude_list), collapse = ", "))
+  } else {
+    ""
+  }
+
   query <- sprintf("
     COPY (
       SELECT 
-        ST_AsWKB(ST_Transform(ST_Force2D(Shape), '%s', '%s')) as geom_wkb,
-        * EXCLUDE(Shape, Shape_Length)
+        ST_AsWKB(ST_Transform(ST_Force2D(\"%s\"), '%s', '%s')) as geom_wkb,
+        * %s
       FROM ST_Read('%s')
     ) TO '%s' (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 100000)
-  ", sweref99_tm, wgs84, source_path, geoparquet_path)
+  ", geom_col, sweref99_tm, wgs84, exclude_clause, source_path, geoparquet_path)
   
   if (verbose) {
     cli::cli_alert_info("Converting {basename(source_path)} to GeoParquet...")

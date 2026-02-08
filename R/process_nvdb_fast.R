@@ -81,20 +81,51 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
   # Build query based on input format
   if (is_geoparquet) {
     # GeoParquet: geom_wkb already exists and is in WGS84
+    # Note: we use ST_AsWKB explicitly because DuckDB might automatically 
+    # cast the blob to its internal GEOMETRY type when reading.
     # Get column list using read_parquet
     all_cols <- DBI::dbGetQuery(con, sprintf("SELECT * FROM read_parquet('%s') LIMIT 0", gdb_path))
     available_cols <- names(all_cols)
     
+    # Check for our standard geometry column name
+    if ("geom_wkb" %in% available_cols) {
+      geom_col_in_parquet <- "geom_wkb"
+    } else {
+      # Try to find any column that might be geometry
+      # Look for common names: 'geometry', 'geom', or anything that DuckDB thinks is geometry
+      geom_col_in_parquet <- NULL
+      for (col in available_cols) {
+        test <- tryCatch({
+          DBI::dbGetQuery(con, sprintf("
+            SELECT ST_GeometryType(\"%s\") as gtype 
+            FROM read_parquet('%s') 
+            WHERE \"%s\" IS NOT NULL 
+            LIMIT 1
+          ", col, gdb_path, col))
+        }, error = function(e) NULL)
+        if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
+          geom_col_in_parquet <- col
+          break
+        }
+      }
+      
+      if (is.null(geom_col_in_parquet)) {
+        stop("Could not detect geometry column in Parquet file: ", gdb_path)
+      }
+    }
+    
     select_cols <- intersect(needed_cols, available_cols)
+    # Ensure we don't include the geometry column in properties
+    select_cols <- setdiff(select_cols, geom_col_in_parquet)
     col_list <- paste(sprintf('"%s"', select_cols), collapse = ", ")
     
     query <- sprintf("
       SELECT 
-        geom_wkb as wkb,
+        ST_AsWKB(\"%s\") as wkb,
         %s
       FROM read_parquet('%s')
       WHERE Kommu_141 = '%s'
-    ", col_list, gdb_path, municipality_code)
+    ", geom_col_in_parquet, col_list, gdb_path, municipality_code)
     
   } else {
     # GDB or GPKG: need to detect geometry column and transform
