@@ -63,3 +63,4 @@ Cargo.lock
 
 # Cargo config (platform specific)
 src/.cargo/
+private

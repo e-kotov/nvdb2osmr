@@ -6,3 +6,4 @@
 ^rextendr\.config$
 ^src/\.cargo$
 ^.venv$
+^private$
