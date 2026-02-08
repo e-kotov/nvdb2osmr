@@ -8,10 +8,11 @@ nvdb_to_pbf(
   input_path,
   output_pbf,
   municipality_codes = NULL,
-  n_workers = parallel::detectCores() - 1,
   use_geoparquet = "auto",
   presplit = FALSE,
-  max_retries = 2
+  max_retries = 2,
+  duckdb_memory_limit = "4GB",
+  duckdb_threads = 1
 )
 }
 \arguments{
@@ -21,17 +22,25 @@ nvdb_to_pbf(
 
 \item{municipality_codes}{Optional vector of municipality codes to process (default: all)}
 
-\item{n_workers}{Number of parallel workers (default: parallel::detectCores() - 1)}
-
 \item{use_geoparquet}{Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")}
 
 \item{presplit}{Logical: whether to pre-split to temp files (default: FALSE)}
 
 \item{max_retries}{Maximum retries for failed municipalities (default: 2)}
+
+\item{duckdb_memory_limit}{Memory limit for DuckDB (e.g., "10GB"). Default "4GB".}
+
+\item{duckdb_threads}{Number of threads for DuckDB. Default 1 (ideal for parallel runs).}
 }
 \value{
 Path to output PBF file (invisibly)
 }
 \description{
 Convert NVDB data to OSM PBF using parallel processing (WKB optimized)
+}
+\details{
+This function supports parallel processing via the \code{mirai} package.
+To run in parallel, you must set up mirai daemons before calling this function,
+for example using \code{mirai::daemons(n_workers)}.
+If no daemons are active, processing will happen sequentially.
 }

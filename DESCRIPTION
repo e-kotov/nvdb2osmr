@@ -20,5 +20,7 @@ Config/testthat/edition: 3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
-SystemRequirements: Cargo (Rust package manager), Osmium Tool (for rosmium)
+SystemRequirements: Cargo (Rust package manager), rustc; the crate
+    'libR-sys' must compile without error. Osmium Tool (for PBF
+    merging and sorting).
 Config/rextendr/version: 0.4.2

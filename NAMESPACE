@@ -3,5 +3,4 @@
 export(nvdb_to_pbf)
 export(process_nvdb_fast)
 export(process_nvdb_wkb)
-importFrom(parallel,detectCores)
 useDynLib(nvdb2osmr, .registration = TRUE)

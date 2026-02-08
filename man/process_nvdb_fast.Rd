@@ -11,6 +11,8 @@ process_nvdb_fast(
   simplify_method = "refname",
   node_id_start = 1L,
   way_id_start = 1L,
+  duckdb_memory_limit = "4GB",
+  duckdb_threads = 1,
   verbose = TRUE
 )
 }
@@ -26,6 +28,10 @@ process_nvdb_fast(
 \item{node_id_start}{Starting node ID for this chunk (default: 1)}
 
 \item{way_id_start}{Starting way ID for this chunk (default: 1)}
+
+\item{duckdb_memory_limit}{Memory limit for DuckDB (e.g., "10GB"). Default "4GB".}
+
+\item{duckdb_threads}{Number of threads for DuckDB. Default 1.}
 
 \item{verbose}{Print progress messages (default: TRUE)}
 }

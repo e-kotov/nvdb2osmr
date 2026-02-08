@@ -3,21 +3,27 @@
 #' @param input_path Path to input file (.gdb, .gpkg, or .geoparquet)
 #' @param output_pbf Path to final output .osm.pbf
 #' @param municipality_codes Optional vector of municipality codes to process (default: all)
-#' @param n_workers Number of parallel workers (default: parallel::detectCores() - 1)
 #' @param use_geoparquet Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")
 #' @param presplit Logical: whether to pre-split to temp files (default: FALSE)
 #' @param max_retries Maximum retries for failed municipalities (default: 2)
-#' @importFrom parallel detectCores
+#' @param duckdb_memory_limit Memory limit for DuckDB (e.g., "10GB"). Default "4GB".
+#' @param duckdb_threads Number of threads for DuckDB. Default 1 (ideal for parallel runs).
+#' @details 
+#' This function supports parallel processing via the \code{mirai} package. 
+#' To run in parallel, you must set up mirai daemons before calling this function, 
+#' for example using \code{mirai::daemons(n_workers)}. 
+#' If no daemons are active, processing will happen sequentially.
 #' @return Path to output PBF file (invisibly)
 #' @export
 nvdb_to_pbf <- function(
   input_path,
   output_pbf,
   municipality_codes = NULL,
-  n_workers = parallel::detectCores() - 1,
   use_geoparquet = "auto",
   presplit = FALSE,
-  max_retries = 2
+  max_retries = 2,
+  duckdb_memory_limit = "4GB",
+  duckdb_threads = 1
 ) {
   # --- Input Validation ---
   if (!is.character(input_path) || length(input_path) != 1) {
@@ -35,11 +41,6 @@ nvdb_to_pbf <- function(
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
 
-  if (!is.numeric(n_workers) || n_workers < 1) {
-    stop("n_workers must be a positive integer")
-  }
-  n_workers <- as.integer(n_workers)
-
   # Ensure mirai is available
   if (!requireNamespace("mirai", quietly = TRUE)) {
     stop(
@@ -47,11 +48,17 @@ nvdb_to_pbf <- function(
     )
   }
 
+  # Check for active mirai daemons
+  status <- mirai::status()
+  daemons_active <- is.numeric(status$daemons) && status$daemons > 0
+
   # --- 0. RESOLVE SOURCE (GDB/GPKG -> GeoParquet if needed) ---
   source_info <- resolve_source(
     input_path,
     use_geoparquet,
     output_pbf,
+    duckdb_memory_limit = duckdb_memory_limit,
+    duckdb_threads = duckdb_threads,
     verbose = TRUE
   )
   gdb_path <- source_info$path # This is the path to use (may be GeoParquet)
@@ -62,6 +69,10 @@ nvdb_to_pbf <- function(
   cli::cli_inform("  - Connecting to DuckDB...")
   con <- DBI::dbConnect(duckdb::duckdb())
   on.exit(if (!is.null(con)) DBI::dbDisconnect(con))
+
+  # Set resource limits for discovery
+  DBI::dbExecute(con, sprintf("SET memory_limit = '%s';", duckdb_memory_limit))
+  DBI::dbExecute(con, sprintf("SET threads = %d;", duckdb_threads))
 
   cli::cli_inform("  - Loading spatial extension...")
   tryCatch({
@@ -178,18 +189,9 @@ nvdb_to_pbf <- function(
     )
   })
 
-  # --- 4. MIRAI SETUP ---
-  cli::cli_inform("Starting {n_workers} async worker{?s}...")
-  mirai::daemons(n = n_workers, dispatcher = TRUE)
-  on.exit(mirai::daemons(0), add = TRUE)
-
-  # Export common data to all workers ONCE
-  mirai::everywhere({
-    library(nvdb2osmr)
-  })
-
-  # --- 5. WORKER FUNCTION (defined outside to be sent to workers) ---
-  process_municipality <- function(cfg, main_gdb) {
+  # --- 4. EXECUTION ---
+  # Define worker function
+  process_municipality <- function(cfg, main_gdb, mem_limit, threads) {
     code <- cfg$code
     source_file <- cfg$source_file
 
@@ -216,6 +218,8 @@ nvdb_to_pbf <- function(
           simplify_method = "refname",
           node_id_start = cfg$node_id_start,
           way_id_start = cfg$way_id_start,
+          duckdb_memory_limit = mem_limit,
+          duckdb_threads = threads,
           verbose = FALSE
         )
 
@@ -233,80 +237,90 @@ nvdb_to_pbf <- function(
     )
   }
 
-  # --- 6. ASYNC EXECUTION WITH RETRY ---
-  cli::cli_inform("Processing municipalities in parallel...")
-  start_time <- Sys.time()
+  if (daemons_active) {
+    # PARALLEL PATH
+    cli::cli_inform("Using {status$daemons} active mirai worker{?s}...")
 
-  all_results <- list()
-  pending_configs <- chunk_configs
-  attempt <- 1
+    # Export common data to all workers ONCE
+    mirai::everywhere({
+      library(nvdb2osmr)
+    })
 
-  while (length(pending_configs) > 0 && attempt <= max_retries) {
-    if (attempt > 1) {
-      cli::cli_inform(
-        "Retry attempt {attempt}/{max_retries} for {length(pending_configs)} failed municipality{?ies}..."
-      )
-    }
+    cli::cli_inform("Processing municipalities in parallel...")
+    start_time <- Sys.time()
 
-    # Launch async tasks with progress bar
-    mirai_res <- mirai::mirai_map(
-      pending_configs,
-      process_municipality,
-      .args = list(main_gdb = gdb_path),
-      .progress = TRUE
-    )
+    all_results <- list()
+    pending_configs <- chunk_configs
+    attempt <- 1
 
-    # Collect results
-    results <- mirai_res[]
-
-    # Separate successful and failed
-    successful_this_round <- results[sapply(results, function(x) {
-      is.list(x) && isTRUE(x$success) && !is.null(x$file)
-    })]
-    failed_this_round <- results[
-      !sapply(results, function(x) is.list(x) && isTRUE(x$success))
-    ]
-
-    # Store successful results
-    all_results <- c(all_results, successful_this_round)
-
-    # Prepare for retry
-    if (length(failed_this_round) > 0) {
-      failed_codes <- sapply(failed_this_round, function(x) {
-        if (is.list(x)) x$code else NA
-      })
-      failed_codes <- failed_codes[!is.na(failed_codes)]
-      pending_configs <- chunk_configs[sapply(chunk_configs, function(x) {
-        x$code %in% failed_codes
-      })]
-
-      if (length(pending_configs) > 0 && attempt < max_retries) {
-        cli::cli_warn(
-          "{length(pending_configs)} municipality{?ies} failed, will retry: {paste(failed_codes, collapse = ', ')}"
+    while (length(pending_configs) > 0 && attempt <= max_retries) {
+      if (attempt > 1) {
+        cli::cli_inform(
+          "Retry attempt {attempt}/{max_retries} for {length(pending_configs)} failed municipality{?ies}..."
         )
-        Sys.sleep(1) # Brief pause before retry
       }
-    } else {
-      pending_configs <- list()
-    }
 
-    attempt <- attempt + 1
-  }
-
-  # Record any final failures
-  if (length(pending_configs) > 0) {
-    failed_codes <- sapply(pending_configs, function(x) x$code)
-    for (code in failed_codes) {
-      all_results <- c(
-        all_results,
-        list(list(
-          code = code,
-          file = NULL,
-          success = FALSE,
-          error = "Max retries exceeded"
-        ))
+      # Launch async tasks with progress bar
+      mirai_res <- mirai::mirai_map(
+        pending_configs,
+        process_municipality,
+        .args = list(
+          main_gdb = gdb_path,
+          mem_limit = duckdb_memory_limit,
+          threads = duckdb_threads
+        ),
+        .progress = TRUE
       )
+
+      # Collect results
+      results <- mirai_res[]
+
+      # Separate successful and failed
+      successful_this_round <- results[sapply(results, function(x) {
+        is.list(x) && isTRUE(x$success) && !is.null(x$file)
+      })]
+      failed_this_round <- results[
+        !sapply(results, function(x) is.list(x) && isTRUE(x$success))
+      ]
+
+      # Store successful results
+      all_results <- c(all_results, successful_this_round)
+
+      # Prepare for retry
+      if (length(failed_this_round) > 0) {
+        failed_codes <- sapply(failed_this_round, function(x) {
+          if (is.list(x)) x$code else NA
+        })
+        failed_codes <- failed_codes[!is.na(failed_codes)]
+        pending_configs <- chunk_configs[sapply(chunk_configs, function(x) {
+          x$code %in% failed_codes
+        })]
+
+        if (length(pending_configs) > 0 && attempt < max_retries) {
+          cli::cli_warn(
+            "{length(pending_configs)} municipality{?ies} failed, will retry: {paste(failed_codes, collapse = ', ')}"
+          )
+          Sys.sleep(1) # Brief pause before retry
+        }
+      } else {
+        pending_configs <- list()
+      }
+
+      attempt <- attempt + 1
     }
+  } else {
+    # SEQUENTIAL PATH (No active daemons)
+    cli::cli_inform("No active mirai daemons found. Processing {length(codes)} municipalities sequentially...")
+    start_time <- Sys.time()
+    
+    all_results <- lapply(chunk_configs, function(cfg) {
+      process_municipality(
+        cfg = cfg, 
+        main_gdb = gdb_path, 
+        mem_limit = duckdb_memory_limit,
+        threads = duckdb_threads
+      )
+    })
   }
 
   elapsed <- difftime(Sys.time(), start_time, units = "mins")
