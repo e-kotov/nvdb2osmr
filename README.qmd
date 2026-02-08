@@ -1,0 +1,114 @@
+---
+format: gfm
+---
+
+<!-- README.md is generated from README.qmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%"
+)
+```
+
+# nvdb2osmr
+
+<!-- badges: start -->
+[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+[![CRAN status](https://www.r-pkg.org/badges/version/nvdb2osmr)](https://CRAN.R-project.org/package=nvdb2osmr)
+<!-- badges: end -->
+
+The goal of nvdb2osmr is to convert Swedish NVDB (Nationell VägDataBas) road network data into OpenStreetMap (OSM) format. It provides high-performance tools using DuckDB for spatial I/O and Rust for topological simplification, enabling efficient processing of large road network datasets.
+
+This R package is based on the [nvdb2osm](https://github.com/NKAmapper/nvdb2osm) Python script by [NKAmapper](https://github.com/NKAmapper), licensed under [CC0-1.0](https://creativecommons.org/publicdomain/zero/1.0/).
+
+## Data Source
+
+To use this package, you need to obtain NVDB data from [Lastkajen](https://lastkajen.trafikverket.se/) at Trafikverket:
+
+1. Register (free) at Lastkajen
+2. Choose the _Homogeniserad_ format for your municipality/county
+3. Check for all attributes
+4. Download the GeoDB folder when ready
+
+## Features
+
+- **Multiple input formats**: GeoJSON, FileGDB (direct from Lastkajen), GeoPackage, or Shapefile
+- **Automatic reprojection**: Converts from Swedish CRS (EPSG:3006) to WGS84 (EPSG:4326)
+- **Country-wide processing**: Split and process large datasets (5M+ segments) by county or municipality
+- **High performance**: DuckDB for spatial I/O, Rust for topological simplification
+- **Flexible output**: OSM XML or PBF (Protocolbuffer) formats
+
+## Supported OSM Tags
+
+The package converts NVDB attributes to standard OSM tags including:
+
+- **Road infrastructure**: `highway`, `ref`, `name`, `junction=roundabout`, `oneway`
+- **Speed and access**: `maxspeed`, `motor_vehicle`, `vehicle`, `hgv`, `access`, `psv`
+- **Physical characteristics**: `surface`, `width`, `lanes`, `layer`, `bridge`, `tunnel`
+- **Restrictions**: `maxheight`, `maxlength`, `maxweight`, `maxaxleload`, `maxwidth:physical`, `hazmat`, `overtaking`
+- **Other**: `low_emission_zone`, `lit`, `bicycle=designated`, `motorroad`, `priority_road`, `traffic_calming`, `barrier`, railway crossings, rest areas, ferry routes
+
+## Installation
+
+You can install the development version of nvdb2osmr from [GitHub](https://github.com/) with:
+
+``` r
+# install.packages("pak")
+pak::pak("e-kotov/nvdb2osmr")
+```
+
+## Example
+
+Convert a municipality from NVDB FileGDB to OSM PBF:
+
+```r
+library(nvdb2osmr)
+
+# Convert a single municipality (e.g., Umeå = 2480)
+nvdb_to_pbf(
+  input_path = "path/to/nvdb_data.gdb",
+  output_pbf = "output/umea.osm.pbf",
+  municipality_codes = "2480"
+)
+```
+
+Process multiple municipalities in parallel:
+
+```r
+# Process several municipalities with automatic parallelization
+nvdb_to_pbf(
+  input_path = "path/to/nvdb_data.gdb",
+  output_pbf = "output/region.osm.pbf",
+  municipality_codes = c("2480", "2580", "2581"),  # Umeå, Skellefteå, Piteå
+  n_workers = 4
+)
+```
+
+Process all municipalities in a dataset (e.g., full Sweden):
+
+```r
+# Process all municipalities automatically
+# For large datasets, GeoParquet optimization is applied automatically
+nvdb_to_pbf(
+  input_path = "path/to/sweden_nvdb.gdb",
+  output_pbf = "output/sweden.osm.pbf",
+  n_workers = parallel::detectCores() - 1
+)
+```
+
+Advanced options:
+
+```r
+# Force GeoParquet conversion for faster subsequent runs
+# Enable pre-splitting for better load balancing on very large datasets
+nvdb_to_pbf(
+  input_path = "path/to/nvdb_data.gdb",
+  output_pbf = "output/sweden.osm.pbf",
+  use_geoparquet = TRUE,   # Convert to GeoParquet (10x faster for large files)
+  presplit = TRUE,         # Pre-split by municipality for better parallelization
+  max_retries = 3          # Retry failed municipalities
+)
+```

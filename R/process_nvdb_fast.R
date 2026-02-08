@@ -136,7 +136,7 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
     
     query <- sprintf("
       SELECT 
-        ST_AsWKB(ST_Transform(\"%s\", '%s', '%s')) as wkb,
+        ST_AsWKB(ST_Transform(ST_Force2D(\"%s\"), '%s', '%s')) as wkb,
         %s
       FROM ST_Read('%s') 
       WHERE Kommu_141 = '%s'

@@ -93,7 +93,7 @@ convert_to_geoparquet <- function(source_path, geoparquet_path, verbose = TRUE) 
   query <- sprintf("
     COPY (
       SELECT 
-        ST_AsWKB(ST_Transform(Shape, '%s', '%s')) as geom_wkb,
+        ST_AsWKB(ST_Transform(ST_Force2D(Shape), '%s', '%s')) as geom_wkb,
         * EXCLUDE(Shape, Shape_Length)
       FROM ST_Read('%s')
     ) TO '%s' (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 100000)
