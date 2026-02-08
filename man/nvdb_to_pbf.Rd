@@ -8,6 +8,8 @@ nvdb_to_pbf(
   input_path,
   output_pbf,
   municipality_codes = NULL,
+  county_codes = NULL,
+  split_by = c("municipality", "county"),
   use_geoparquet = "auto",
   presplit = FALSE,
   max_retries = 2,
@@ -20,7 +22,11 @@ nvdb_to_pbf(
 
 \item{output_pbf}{Path to final output .osm.pbf}
 
-\item{municipality_codes}{Optional vector of municipality codes to process (default: all)}
+\item{municipality_codes}{Optional vector of 4-digit municipality codes to process (default: all)}
+
+\item{county_codes}{Optional vector of 2-digit county codes to process (e.g., "01" for Stockholm)}
+
+\item{split_by}{Strategy for splitting the work: "municipality" (default) or "county".}
 
 \item{use_geoparquet}{Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")}
 
@@ -43,4 +49,7 @@ This function supports parallel processing via the \code{mirai} package.
 To run in parallel, you must set up mirai daemons before calling this function,
 for example using \code{mirai::daemons(n_workers)}.
 If no daemons are active, processing will happen sequentially.
+
+Splitting by "municipality" is recommended for high-core counts as it provides
+more granular tasks (~290 tasks). "county" provides ~21 tasks.
 }

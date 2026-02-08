@@ -2,7 +2,9 @@
 #' 
 #' @param gdb_path Path to input file (GDB, GPKG, or GeoParquet)
 #' @param output_pbf Output PBF file path
-#' @param municipality_code Municipality code to process
+#' @param municipality_code 4-digit municipality code to process (e.g., '2480')
+#' @param county_code 2-digit county code to process (e.g., '24'). 
+#'        Used if municipality_code is NULL.
 #' @param simplify_method Simplification method (default: "refname")
 #' @param node_id_start Starting node ID for this chunk (default: 1)
 #' @param way_id_start Starting way ID for this chunk (default: 1)
@@ -11,7 +13,9 @@
 #' @param verbose Print progress messages (default: TRUE)
 #' @return Path to output PBF file (invisibly)
 #' @export
-process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
+process_nvdb_fast <- function(gdb_path, output_pbf, 
+                               municipality_code = NULL,
+                               county_code = NULL,
                                simplify_method = "refname",
                                node_id_start = 1L,
                                way_id_start = 1L,
@@ -35,13 +39,10 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
   
-  if (!is.character(municipality_code) || length(municipality_code) != 1) {
-    stop("municipality_code must be a single character string")
+  if (is.null(municipality_code) && is.null(county_code)) {
+    stop("Either municipality_code or county_code must be provided")
   }
-  if (!grepl("^[0-9]+$", municipality_code)) {
-    stop("municipality_code must be numeric (e.g., '2480')")
-  }
-  
+
   valid_methods <- c("refname", "connected")
   if (!simplify_method %in% valid_methods) {
     stop("simplify_method must be one of: ", paste(valid_methods, collapse = ", "))
@@ -49,7 +50,6 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
   
   # Detect input format
   is_geoparquet <- grepl("\\.(geoparquet|parquet)$", gdb_path, ignore.case = TRUE)
-  is_gpkg <- grepl("\\.gpkg$", gdb_path, ignore.case = TRUE)
   
   # Key columns needed for tag mapping
   needed_cols <- c(
@@ -61,7 +61,8 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
     "Namn_130", "Vagnr_10370", "Evag_555",
     "Bredd_156",
     "Typ_369",
-    "ROUTE_ID", "Driftbidrag statligt/Vägnr"
+    "ROUTE_ID", "Driftbidrag statligt/Vägnr",
+    "Kommu_141"
   )
   
   # Progress function
@@ -85,6 +86,13 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
       stop("Failed to load DuckDB 'spatial' extension: ", conditionMessage(e2))
     })
   })
+
+  # Build the filter
+  if (!is.null(municipality_code)) {
+    filter_expr <- sprintf("Kommu_141 = '%s'", municipality_code)
+  } else {
+    filter_expr <- sprintf("Kommu_141 LIKE '%s%%'", county_code)
+  }
   
   # Build query based on input format
   if (is_geoparquet) {
@@ -100,7 +108,6 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
       geom_col_in_parquet <- "geom_wkb"
     } else {
       # Try to find any column that might be geometry
-      # Look for common names: 'geometry', 'geom', or anything that DuckDB thinks is geometry
       geom_col_in_parquet <- NULL
       for (col in available_cols) {
         test <- tryCatch({
@@ -132,8 +139,8 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
         ST_AsWKB(\"%s\") as wkb,
         %s
       FROM read_parquet('%s')
-      WHERE Kommu_141 = '%s'
-    ", geom_col_in_parquet, col_list, gdb_path, municipality_code)
+      WHERE %s
+    ", geom_col_in_parquet, col_list, gdb_path, filter_expr)
     
   } else {
     # GDB or GPKG: need to detect geometry column and transform
@@ -182,15 +189,15 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
         ST_AsWKB(ST_Transform(ST_Force2D(\"%s\"), '%s', '%s')) as wkb,
         %s
       FROM ST_Read('%s') 
-      WHERE Kommu_141 = '%s'
-    ", geom_col, sweref99_tm, wgs84, col_list, gdb_path, municipality_code)
+      WHERE %s
+    ", geom_col, sweref99_tm, wgs84, col_list, gdb_path, filter_expr)
   }
   
   df <- DBI::dbGetQuery(con, query)
   msg("Read {nrow(df)} segments")
   
   if (nrow(df) == 0) {
-    stop("No data found for municipality: ", municipality_code)
+    stop("No data found for area filter: ", filter_expr)
   }
   
   # WKB is already in raw bytes from DuckDB

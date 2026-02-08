@@ -2,7 +2,9 @@
 #'
 #' @param input_path Path to input file (.gdb, .gpkg, or .geoparquet)
 #' @param output_pbf Path to final output .osm.pbf
-#' @param municipality_codes Optional vector of municipality codes to process (default: all)
+#' @param municipality_codes Optional vector of 4-digit municipality codes to process (default: all)
+#' @param county_codes Optional vector of 2-digit county codes to process (e.g., "01" for Stockholm)
+#' @param split_by Strategy for splitting the work: "municipality" (default) or "county".
 #' @param use_geoparquet Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")
 #' @param presplit Logical: whether to pre-split to temp files (default: FALSE)
 #' @param max_retries Maximum retries for failed municipalities (default: 2)
@@ -13,18 +15,25 @@
 #' To run in parallel, you must set up mirai daemons before calling this function, 
 #' for example using \code{mirai::daemons(n_workers)}. 
 #' If no daemons are active, processing will happen sequentially.
+#' 
+#' Splitting by "municipality" is recommended for high-core counts as it provides 
+#' more granular tasks (~290 tasks). "county" provides ~21 tasks.
 #' @return Path to output PBF file (invisibly)
 #' @export
 nvdb_to_pbf <- function(
   input_path,
   output_pbf,
   municipality_codes = NULL,
+  county_codes = NULL,
+  split_by = c("municipality", "county"),
   use_geoparquet = "auto",
   presplit = FALSE,
   max_retries = 2,
   duckdb_memory_limit = "4GB",
   duckdb_threads = 1
 ) {
+  split_by <- match.arg(split_by)
+
   # --- Input Validation ---
   if (!is.character(input_path) || length(input_path) != 1) {
     stop("input_path must be a single character string")
@@ -64,7 +73,7 @@ nvdb_to_pbf <- function(
   gdb_path <- source_info$path # This is the path to use (may be GeoParquet)
 
   # --- 1. DISCOVERY ---
-  cli::cli_inform("Discovering municipalities...")
+  cli::cli_inform("Discovering areas to process...")
 
   cli::cli_inform("  - Connecting to DuckDB...")
   con <- DBI::dbConnect(duckdb::duckdb())
@@ -72,7 +81,7 @@ nvdb_to_pbf <- function(
 
   # Set resource limits for discovery
   DBI::dbExecute(con, sprintf("SET memory_limit = '%s';", duckdb_memory_limit))
-  DBI::dbExecute(con, sprintf("SET threads = %d;", duckdb_threads))
+  DBI::dbExecute(con, sprintf("SET threads = 1;")) # Discovery is light
 
   cli::cli_inform("  - Loading spatial extension...")
   tryCatch({
@@ -88,29 +97,43 @@ nvdb_to_pbf <- function(
   # Determine table reference based on source type
   is_geoparquet_source <- source_info$is_geoparquet
   if (is_geoparquet_source) {
-    # Parquet is built-in, no LOAD/INSTALL needed
     table_ref <- sprintf("read_parquet('%s')", gdb_path)
   } else {
     table_ref <- sprintf("ST_Read('%s')", gdb_path)
   }
 
-  if (is.null(municipality_codes)) {
-    cli::cli_inform(
-      "  - Querying unique municipality codes from {table_ref}..."
-    )
-    codes <- DBI::dbGetQuery(
-      con,
-      sprintf("SELECT DISTINCT Kommu_141 FROM %s ORDER BY Kommu_141", table_ref)
-    )$Kommu_141
+  # Build the code selection logic
+  if (split_by == "municipality") {
+    code_col <- "Kommu_141"
+    label <- "municipality"
   } else {
-    # Validate municipality codes
-    codes <- as.character(municipality_codes)
-    if (any(!grepl("^[0-9]+$", codes))) {
-      stop("All municipality_codes must be numeric strings (e.g., '2480')")
-    }
+    # County code is the first 2 digits of the municipality code
+    code_col <- "SUBSTR(Kommu_141, 1, 2)"
+    label <- "county"
   }
 
-  cli::cli_inform("Found {length(codes)} municipality{?ies} to process")
+  # Apply filters
+  where_clause <- ""
+  if (!is.null(municipality_codes)) {
+    codes_str <- paste(sprintf("'%s'", municipality_codes), collapse = ", ")
+    where_clause <- sprintf("WHERE Kommu_141 IN (%s)", codes_str)
+  } else if (!is.null(county_codes)) {
+    # If filtering by county, but split_by is municipality, we still use LIKE
+    codes_str <- paste(sprintf("Kommu_141 LIKE '%s%%'", county_codes), collapse = " OR ")
+    where_clause <- sprintf("WHERE (%s)", codes_str)
+  }
+
+  query <- sprintf("SELECT DISTINCT %s as area_code FROM %s %s ORDER BY area_code", 
+                   code_col, table_ref, where_clause)
+  
+  cli::cli_inform("  - Querying unique {label} codes...")
+  codes <- DBI::dbGetQuery(con, query)$area_code
+  
+  if (length(codes) == 0) {
+    stop("No areas found matching the criteria.")
+  }
+
+  cli::cli_inform("Found {length(codes)} {label}{?s} to process")
 
   # --- 2. PRE-SPLIT (optional) ---
   temp_dir <- NULL
@@ -118,44 +141,37 @@ nvdb_to_pbf <- function(
   counts <- NULL
 
   if (presplit) {
-    cli::cli_inform("Pre-splitting to individual municipality files...")
+    cli::cli_inform("Pre-splitting to individual area files...")
     temp_dir <- tempfile(pattern = "nvdb_split_")
     dir.create(temp_dir, showWarnings = FALSE)
 
     # Get segment counts for LPT scheduling
-    counts <- DBI::dbGetQuery(
-      con,
-      sprintf(
-        "
-      SELECT Kommu_141, COUNT(*) as n 
-      FROM %s 
-      GROUP BY Kommu_141
-    ",
-        table_ref
-      )
-    )
+    count_query <- sprintf("SELECT %s as area_code, COUNT(*) as n FROM %s %s GROUP BY area_code",
+                           code_col, table_ref, where_clause)
+    counts <- DBI::dbGetQuery(con, count_query)
 
     # Sort by count descending (LPT scheduling - largest first)
     counts <- counts[order(-counts$n), ]
-    codes <- counts$Kommu_141
+    codes <- counts$area_code
 
     cli::cli_inform(
-      "Largest municipality: {codes[1]} ({format(counts$n[1], big.mark = ',')} segments)"
+      "Largest {label}: {codes[1]} ({format(counts$n[1], big.mark = ',')} segments)"
     )
 
-    # Export each municipality to separate GeoPackage
+    # Export each area to separate GeoPackage
     for (code in codes) {
-      out_file <- file.path(temp_dir, sprintf("muni_%s.gpkg", code))
-      # Use table_ref for the source (works for both GeoParquet and GDB/GPKG)
+      out_file <- file.path(temp_dir, sprintf("area_%s.gpkg", code))
+      
+      area_filter <- if (split_by == "municipality") {
+        sprintf("Kommu_141 = '%s'", code)
+      } else {
+        sprintf("Kommu_141 LIKE '%s%%'", code)
+      }
+
       query <- sprintf(
-        "
-        COPY (
-          SELECT * FROM %s 
-          WHERE Kommu_141 = '%s'
-        ) TO '%s' WITH (FORMAT GDAL, DRIVER 'GPKG')
-      ",
+        "COPY (SELECT * FROM %s WHERE %s) TO '%s' WITH (FORMAT GDAL, DRIVER 'GPKG')",
         table_ref,
-        code,
+        area_filter,
         out_file
       )
 
@@ -171,7 +187,7 @@ nvdb_to_pbf <- function(
     }
 
     cli::cli_inform(
-      "Pre-split {length(source_files)}/{length(codes)} municipalities"
+      "Pre-split {length(source_files)}/{length(codes)} areas"
     )
   }
 
@@ -185,13 +201,14 @@ nvdb_to_pbf <- function(
       code = codes[i],
       node_id_start = (i - 1) * 10000000 + 1,
       way_id_start = (i - 1) * 10000000 + 1,
-      source_file = if (presplit) source_files[[codes[i]]] else NULL
+      source_file = if (presplit) source_files[[codes[i]]] else NULL,
+      split_by = split_by
     )
   })
 
   # --- 4. EXECUTION ---
   # Define worker function
-  process_municipality <- function(cfg, main_gdb, mem_limit, threads) {
+  process_area <- function(cfg, main_gdb, mem_limit, threads) {
     code <- cfg$code
     source_file <- cfg$source_file
 
@@ -214,7 +231,8 @@ nvdb_to_pbf <- function(
         process_nvdb_fast(
           gdb_path = gdb_to_use,
           output_pbf = chunk_file,
-          municipality_code = code,
+          municipality_code = if (cfg$split_by == "municipality") code else NULL,
+          county_code = if (cfg$split_by == "county") code else NULL,
           simplify_method = "refname",
           node_id_start = cfg$node_id_start,
           way_id_start = cfg$way_id_start,
@@ -246,7 +264,7 @@ nvdb_to_pbf <- function(
       library(nvdb2osmr)
     })
 
-    cli::cli_inform("Processing municipalities in parallel...")
+    cli::cli_inform("Processing areas in parallel...")
     start_time <- Sys.time()
 
     all_results <- list()
@@ -256,14 +274,14 @@ nvdb_to_pbf <- function(
     while (length(pending_configs) > 0 && attempt <= max_retries) {
       if (attempt > 1) {
         cli::cli_inform(
-          "Retry attempt {attempt}/{max_retries} for {length(pending_configs)} failed municipality{?ies}..."
+          "Retry attempt {attempt}/{max_retries} for {length(pending_configs)} failed area{?s}..."
         )
       }
 
       # Launch async tasks with progress bar
       mirai_res <- mirai::mirai_map(
         pending_configs,
-        process_municipality,
+        process_area,
         .args = list(
           main_gdb = gdb_path,
           mem_limit = duckdb_memory_limit,
@@ -298,7 +316,7 @@ nvdb_to_pbf <- function(
 
         if (length(pending_configs) > 0 && attempt < max_retries) {
           cli::cli_warn(
-            "{length(pending_configs)} municipality{?ies} failed, will retry: {paste(failed_codes, collapse = ', ')}"
+            "{length(pending_configs)} area{?s} failed, will retry: {paste(failed_codes, collapse = ', ')}"
           )
           Sys.sleep(1) # Brief pause before retry
         }
@@ -310,11 +328,11 @@ nvdb_to_pbf <- function(
     }
   } else {
     # SEQUENTIAL PATH (No active daemons)
-    cli::cli_inform("No active mirai daemons found. Processing {length(codes)} municipalities sequentially...")
+    cli::cli_inform("No active mirai daemons found. Processing {length(codes)} areas sequentially...")
     start_time <- Sys.time()
     
     all_results <- lapply(chunk_configs, function(cfg) {
-      process_municipality(
+      process_area(
         cfg = cfg, 
         main_gdb = gdb_path, 
         mem_limit = duckdb_memory_limit,
@@ -338,7 +356,7 @@ nvdb_to_pbf <- function(
       if (is.list(x) && !is.null(x$code)) x$code else "unknown"
     })
     cli::cli_warn(
-      "{length(failed)} municipality{?ies} failed after {max_retries} attempt{?s}: {paste(failed_codes, collapse = ', ')}"
+      "{length(failed)} area{?s} failed after {max_retries} attempt{?s}: {paste(failed_codes, collapse = ', ')}"
     )
     for (f in failed) {
       if (is.list(f)) {
@@ -350,11 +368,11 @@ nvdb_to_pbf <- function(
 
   cli::cli_inform("")
   cli::cli_alert_success(
-    "Completed {length(successful)}/{length(codes)} municipalities in {round(as.numeric(elapsed), 1)} minutes"
+    "Completed {length(successful)}/{length(codes)} areas in {round(as.numeric(elapsed), 1)} minutes"
   )
 
   if (length(successful) == 0) {
-    stop("No municipalities were successfully processed")
+    stop("No areas were successfully processed")
   }
 
   # Collect chunk files

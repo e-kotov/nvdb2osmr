@@ -7,7 +7,8 @@
 process_nvdb_fast(
   gdb_path,
   output_pbf,
-  municipality_code,
+  municipality_code = NULL,
+  county_code = NULL,
   simplify_method = "refname",
   node_id_start = 1L,
   way_id_start = 1L,
@@ -21,7 +22,10 @@ process_nvdb_fast(
 
 \item{output_pbf}{Output PBF file path}
 
-\item{municipality_code}{Municipality code to process}
+\item{municipality_code}{4-digit municipality code to process (e.g., '2480')}
+
+\item{county_code}{2-digit county code to process (e.g., '24').
+Used if municipality_code is NULL.}
 
 \item{simplify_method}{Simplification method (default: "refname")}
 
