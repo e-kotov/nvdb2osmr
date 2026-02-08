@@ -68,11 +68,15 @@ process_nvdb_fast <- function(gdb_path, output_pbf, municipality_code,
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   
   # Install/load required extensions
-  DBI::dbExecute(con, "INSTALL spatial; LOAD spatial;")
-  
-  if (is_geoparquet) {
-    DBI::dbExecute(con, "INSTALL parquet; LOAD parquet;")
-  }
+  tryCatch({
+    DBI::dbExecute(con, "LOAD spatial;")
+  }, error = function(e) {
+    tryCatch({
+      DBI::dbExecute(con, "INSTALL spatial; LOAD spatial;")
+    }, error = function(e2) {
+      stop("Failed to load DuckDB 'spatial' extension: ", conditionMessage(e2))
+    })
+  })
   
   # Build query based on input format
   if (is_geoparquet) {

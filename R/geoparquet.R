@@ -82,7 +82,15 @@ convert_to_geoparquet <- function(source_path, geoparquet_path, verbose = TRUE) 
   con <- DBI::dbConnect(duckdb::duckdb())
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   
-  DBI::dbExecute(con, "INSTALL spatial; LOAD spatial;")
+  tryCatch({
+    DBI::dbExecute(con, "LOAD spatial;")
+  }, error = function(e) {
+    tryCatch({
+      DBI::dbExecute(con, "INSTALL spatial; LOAD spatial;")
+    }, error = function(e2) {
+      stop("Failed to load DuckDB 'spatial' extension: ", conditionMessage(e2))
+    })
+  })
   
   # PROJ strings for transformation
   sweref99_tm <- "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
