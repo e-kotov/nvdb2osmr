@@ -4,7 +4,7 @@
 #' @param output_pbf Path to final output .osm.pbf
 #' @param municipality_codes Optional vector of 4-digit municipality codes to process (default: all)
 #' @param county_codes Optional vector of 2-digit county codes to process (e.g., "01" for Stockholm)
-#' @param split_by Strategy for splitting the work: "municipality" (default) or "county".
+#' @param split_by Strategy for splitting the work: "municipality" (default), "county", or "none" (process whole file in one go).
 #' @param use_geoparquet Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")
 #' @param presplit Logical: whether to pre-split to temp files (default: FALSE)
 #' @param max_retries Maximum retries for failed municipalities (default: 2)
@@ -17,7 +17,8 @@
 #' If no daemons are active, processing will happen sequentially.
 #' 
 #' Splitting by "municipality" is recommended for high-core counts as it provides 
-#' more granular tasks (~290 tasks). "county" provides ~21 tasks.
+#' more granular tasks (~290 tasks). "county" provides ~21 tasks. 
+#' "none" handles everything in a single process (memory intensive for large areas).
 #' @return Path to output PBF file (invisibly)
 #' @export
 nvdb_to_pbf <- function(
@@ -25,7 +26,7 @@ nvdb_to_pbf <- function(
   output_pbf,
   municipality_codes = NULL,
   county_codes = NULL,
-  split_by = c("municipality", "county"),
+  split_by = c("municipality", "county", "none"),
   use_geoparquet = "auto",
   presplit = FALSE,
   max_retries = 2,
@@ -73,138 +74,152 @@ nvdb_to_pbf <- function(
   gdb_path <- source_info$path # This is the path to use (may be GeoParquet)
 
   # --- 1. DISCOVERY ---
-  cli::cli_inform("Discovering areas to process...")
-
-  cli::cli_inform("  - Connecting to DuckDB...")
-  con <- DBI::dbConnect(duckdb::duckdb())
-  on.exit(if (!is.null(con)) DBI::dbDisconnect(con))
-
-  # Set resource limits for discovery
-  DBI::dbExecute(con, sprintf("SET memory_limit = '%s';", duckdb_memory_limit))
-  DBI::dbExecute(con, sprintf("SET threads = 1;")) # Discovery is light
-
-  cli::cli_inform("  - Loading spatial extension...")
-  tryCatch({
-    DBI::dbExecute(con, "LOAD spatial;")
-  }, error = function(e) {
-    tryCatch({
-      DBI::dbExecute(con, "INSTALL spatial; LOAD spatial;")
-    }, error = function(e2) {
-      stop("Failed to load DuckDB 'spatial' extension. Please ensure it is installed: ", conditionMessage(e2))
-    })
-  })
-
-  # Determine table reference based on source type
-  is_geoparquet_source <- source_info$is_geoparquet
-  if (is_geoparquet_source) {
-    table_ref <- sprintf("read_parquet('%s')", gdb_path)
-  } else {
-    table_ref <- sprintf("ST_Read('%s')", gdb_path)
-  }
-
-  # Build the code selection logic
-  if (split_by == "municipality") {
-    code_col <- "Kommu_141"
-    label <- "municipality"
-  } else {
-    # County code is the first 2 digits of the municipality code
-    code_col <- "SUBSTR(Kommu_141, 1, 2)"
-    label <- "county"
-  }
-
-  # Apply filters
-  where_clause <- ""
-  if (!is.null(municipality_codes)) {
-    codes_str <- paste(sprintf("'%s'", municipality_codes), collapse = ", ")
-    where_clause <- sprintf("WHERE Kommu_141 IN (%s)", codes_str)
-  } else if (!is.null(county_codes)) {
-    # If filtering by county, but split_by is municipality, we still use LIKE
-    codes_str <- paste(sprintf("Kommu_141 LIKE '%s%%'", county_codes), collapse = " OR ")
-    where_clause <- sprintf("WHERE (%s)", codes_str)
-  }
-
-  query <- sprintf("SELECT DISTINCT %s as area_code FROM %s %s ORDER BY area_code", 
-                   code_col, table_ref, where_clause)
-  
-  cli::cli_inform("  - Querying unique {label} codes...")
-  codes <- DBI::dbGetQuery(con, query)$area_code
-  
-  if (length(codes) == 0) {
-    stop("No areas found matching the criteria.")
-  }
-
-  cli::cli_inform("Found {length(codes)} {label}{?s} to process")
-
-  # --- 2. PRE-SPLIT (optional) ---
   temp_dir <- NULL
-  source_files <- list()
-  counts <- NULL
+  if (split_by != "none") {
+    cli::cli_inform("Discovering areas to process...")
 
-  if (presplit) {
-    cli::cli_inform("Pre-splitting to individual area files...")
-    temp_dir <- tempfile(pattern = "nvdb_split_")
-    dir.create(temp_dir, showWarnings = FALSE)
+    cli::cli_inform("  - Connecting to DuckDB...")
+    con <- DBI::dbConnect(duckdb::duckdb())
+    on.exit(if (!is.null(con)) DBI::dbDisconnect(con))
 
-    # Get segment counts for LPT scheduling
-    count_query <- sprintf("SELECT %s as area_code, COUNT(*) as n FROM %s %s GROUP BY area_code",
-                           code_col, table_ref, where_clause)
-    counts <- DBI::dbGetQuery(con, count_query)
+    # Set resource limits for discovery
+    DBI::dbExecute(con, sprintf("SET memory_limit = '%s';", duckdb_memory_limit))
+    DBI::dbExecute(con, sprintf("SET threads = 1;")) # Discovery is light
 
-    # Sort by count descending (LPT scheduling - largest first)
-    counts <- counts[order(-counts$n), ]
-    codes <- counts$area_code
+    cli::cli_inform("  - Loading spatial extension...")
+    tryCatch({
+      DBI::dbExecute(con, "LOAD spatial;")
+    }, error = function(e) {
+      tryCatch({
+        DBI::dbExecute(con, "INSTALL spatial; LOAD spatial;")
+      }, error = function(e2) {
+        stop("Failed to load DuckDB 'spatial' extension. Please ensure it is installed: ", conditionMessage(e2))
+      })
+    })
 
-    cli::cli_inform(
-      "Largest {label}: {codes[1]} ({format(counts$n[1], big.mark = ',')} segments)"
-    )
+    # Determine table reference based on source type
+    is_geoparquet_source <- source_info$is_geoparquet
+    if (is_geoparquet_source) {
+      table_ref <- sprintf("read_parquet('%s')", gdb_path)
+    } else {
+      table_ref <- sprintf("ST_Read('%s')", gdb_path)
+    }
 
-    # Export each area to separate GeoPackage
-    for (code in codes) {
-      out_file <- file.path(temp_dir, sprintf("area_%s.gpkg", code))
-      
-      area_filter <- if (split_by == "municipality") {
-        sprintf("Kommu_141 = '%s'", code)
-      } else {
-        sprintf("Kommu_141 LIKE '%s%%'", code)
-      }
+    # Build the code selection logic
+    if (split_by == "municipality") {
+      code_col <- "Kommu_141"
+      label <- "municipality"
+    } else {
+      # County code is the first 2 digits of the municipality code
+      code_col <- "SUBSTR(Kommu_141, 1, 2)"
+      label <- "county"
+    }
 
-      query <- sprintf(
-        "COPY (SELECT * FROM %s WHERE %s) TO '%s' WITH (FORMAT GDAL, DRIVER 'GPKG')",
-        table_ref,
-        area_filter,
-        out_file
+    # Apply filters
+    where_clause <- ""
+    if (!is.null(municipality_codes)) {
+      codes_str <- paste(sprintf("'%s'", municipality_codes), collapse = ", ")
+      where_clause <- sprintf("WHERE Kommu_141 IN (%s)", codes_str)
+    } else if (!is.null(county_codes)) {
+      # If filtering by county, but split_by is municipality, we still use LIKE
+      codes_str <- paste(sprintf("Kommu_141 LIKE '%s%%'", county_codes), collapse = " OR ")
+      where_clause <- sprintf("WHERE (%s)", codes_str)
+    }
+
+    query <- sprintf("SELECT DISTINCT %s as area_code FROM %s %s ORDER BY area_code", 
+                     code_col, table_ref, where_clause)
+    
+    cli::cli_inform("  - Querying unique {label} codes...")
+    codes <- DBI::dbGetQuery(con, query)$area_code
+    
+    if (length(codes) == 0) {
+      stop("No areas found matching the criteria.")
+    }
+
+    cli::cli_inform("Found {length(codes)} {label}{?s} to process")
+
+    # --- 2. PRE-SPLIT (optional) ---
+    temp_dir <- NULL
+    source_files <- list()
+    counts <- NULL
+
+    if (presplit) {
+      cli::cli_inform("Pre-splitting to individual area files...")
+      temp_dir <- tempfile(pattern = "nvdb_split_")
+      dir.create(temp_dir, showWarnings = FALSE)
+
+      # Get segment counts for LPT scheduling
+      count_query <- sprintf("SELECT %s as area_code, COUNT(*) as n FROM %s %s GROUP BY area_code",
+                             code_col, table_ref, where_clause)
+      counts <- DBI::dbGetQuery(con, count_query)
+
+      # Sort by count descending (LPT scheduling - largest first)
+      counts <- counts[order(-counts$n), ]
+      codes <- counts$area_code
+
+      cli::cli_inform(
+        "Largest {label}: {codes[1]} ({format(counts$n[1], big.mark = ',')} segments)"
       )
 
-      tryCatch(
-        {
-          DBI::dbExecute(con, query)
-          source_files[[code]] <- out_file
-        },
-        error = function(e) {
-          cli::cli_warn("Failed to export {code}: {e$message}")
+      # Export each area to separate GeoPackage
+      for (code in codes) {
+        out_file <- file.path(temp_dir, sprintf("area_%s.gpkg", code))
+        
+        area_filter <- if (split_by == "municipality") {
+          sprintf("Kommu_141 = '%s'", code)
+        } else {
+          sprintf("Kommu_141 LIKE '%s%%'", code)
         }
+
+        query <- sprintf(
+          "COPY (SELECT * FROM %s WHERE %s) TO '%s' WITH (FORMAT GDAL, DRIVER 'GPKG')",
+          table_ref,
+          area_filter,
+          out_file
+        )
+
+        tryCatch(
+          {
+            DBI::dbExecute(con, query)
+            source_files[[code]] <- out_file
+          },
+          error = function(e) {
+            cli::cli_warn("Failed to export {code}: {e$message}")
+          }
+        )
+      }
+
+      cli::cli_inform(
+        "Pre-split {length(source_files)}/{length(codes)} areas"
       )
     }
 
-    cli::cli_inform(
-      "Pre-split {length(source_files)}/{length(codes)} areas"
-    )
+    DBI::dbDisconnect(con)
+    con <- NULL
+
+    # --- 3. ID RANGE ASSIGNMENT ---
+    # 10M IDs per chunk (confirmed safe: largest county < 3M IDs)
+    chunk_configs <- lapply(seq_along(codes), function(i) {
+      list(
+        code = codes[i],
+        node_id_start = (i - 1) * 10000000 + 1,
+        way_id_start = (i - 1) * 10000000 + 1,
+        source_file = if (presplit) source_files[[codes[i]]] else NULL,
+        split_by = split_by
+      )
+    })
+  } else {
+    # split_by == "none"
+    codes <- "all"
+    chunk_configs <- list(list(
+      code = "sweden",
+      node_id_start = 1,
+      way_id_start = 1,
+      source_file = NULL,
+      split_by = "none"
+    ))
+    label <- "file"
   }
-
-  DBI::dbDisconnect(con)
-  con <- NULL
-
-  # --- 3. ID RANGE ASSIGNMENT ---
-  # 10M IDs per chunk (confirmed safe: largest county < 3M IDs)
-  chunk_configs <- lapply(seq_along(codes), function(i) {
-    list(
-      code = codes[i],
-      node_id_start = (i - 1) * 10000000 + 1,
-      way_id_start = (i - 1) * 10000000 + 1,
-      source_file = if (presplit) source_files[[codes[i]]] else NULL,
-      split_by = split_by
-    )
-  })
 
   # --- 4. EXECUTION ---
   # Define worker function

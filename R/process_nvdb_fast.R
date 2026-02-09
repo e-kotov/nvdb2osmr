@@ -39,10 +39,6 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
   
-  if (is.null(municipality_code) && is.null(county_code)) {
-    stop("Either municipality_code or county_code must be provided")
-  }
-
   valid_methods <- c("refname", "connected")
   if (!simplify_method %in% valid_methods) {
     stop("simplify_method must be one of: ", paste(valid_methods, collapse = ", "))
@@ -88,18 +84,17 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   })
 
   # Build the filter
-  if (!is.null(municipality_code)) {
-    filter_expr <- sprintf("Kommu_141 = '%s'", municipality_code)
+  filter_expr <- if (!is.null(municipality_code)) {
+    sprintf("WHERE Kommu_141 = '%s'", municipality_code)
+  } else if (!is.null(county_code)) {
+    sprintf("WHERE Kommu_141 LIKE '%s%%'", county_code)
   } else {
-    filter_expr <- sprintf("Kommu_141 LIKE '%s%%'", county_code)
+    "" # Process whole file
   }
   
   # Build query based on input format
   if (is_geoparquet) {
-    # GeoParquet: geom_wkb already exists and is in WGS84
-    # Note: we use ST_AsWKB explicitly because DuckDB might automatically 
-    # cast the blob to its internal GEOMETRY type when reading.
-    # Get column list using read_parquet
+    # GeoParquet: Get column list using read_parquet
     all_cols <- DBI::dbGetQuery(con, sprintf("SELECT * FROM read_parquet('%s') LIMIT 0", gdb_path))
     available_cols <- names(all_cols)
     
@@ -134,12 +129,14 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
     select_cols <- setdiff(select_cols, geom_col_in_parquet)
     col_list <- paste(sprintf('"%s"', select_cols), collapse = ", ")
     
+    # Note: we use ST_AsWKB(ST_GeomFromWKB(...)) to ensure standard WKB format.
+    # This handles cases where the column is stored as BLOB or already as GEOMETRY.
     query <- sprintf("
       SELECT 
-        ST_AsWKB(\"%s\") as wkb,
+        ST_AsWKB(ST_GeomFromWKB(\"%s\")) as wkb,
         %s
       FROM read_parquet('%s')
-      WHERE %s
+      %s
     ", geom_col_in_parquet, col_list, gdb_path, filter_expr)
     
   } else {
@@ -189,7 +186,7 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
         ST_AsWKB(ST_Transform(ST_Force2D(\"%s\"), '%s', '%s')) as wkb,
         %s
       FROM ST_Read('%s') 
-      WHERE %s
+      %s
     ", geom_col, sweref99_tm, wgs84, col_list, gdb_path, filter_expr)
   }
   
@@ -197,7 +194,7 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   msg("Read {nrow(df)} segments")
   
   if (nrow(df) == 0) {
-    stop("No data found for area filter: ", filter_expr)
+    stop("No data found for area filter")
   }
   
   # WKB is already in raw bytes from DuckDB

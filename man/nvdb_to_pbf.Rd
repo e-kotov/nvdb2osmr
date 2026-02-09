@@ -9,7 +9,7 @@ nvdb_to_pbf(
   output_pbf,
   municipality_codes = NULL,
   county_codes = NULL,
-  split_by = c("municipality", "county"),
+  split_by = c("municipality", "county", "none"),
   use_geoparquet = "auto",
   presplit = FALSE,
   max_retries = 2,
@@ -26,7 +26,7 @@ nvdb_to_pbf(
 
 \item{county_codes}{Optional vector of 2-digit county codes to process (e.g., "01" for Stockholm)}
 
-\item{split_by}{Strategy for splitting the work: "municipality" (default) or "county".}
+\item{split_by}{Strategy for splitting the work: "municipality" (default), "county", or "none" (process whole file in one go).}
 
 \item{use_geoparquet}{Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")}
 
@@ -52,4 +52,5 @@ If no daemons are active, processing will happen sequentially.
 
 Splitting by "municipality" is recommended for high-core counts as it provides
 more granular tasks (~290 tasks). "county" provides ~21 tasks.
+"none" handles everything in a single process (memory intensive for large areas).
 }
