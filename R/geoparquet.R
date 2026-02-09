@@ -99,8 +99,9 @@ convert_to_geoparquet <- function(source_path, geoparquet_path,
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   
   # Set resource limits
-  DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit_gb)))
-  DBI::dbExecute(con, sprintf("SET threads = %d;", duckdb_threads))
+  limit_str <- paste0(as.integer(duckdb_memory_limit_gb), "GB")
+  DBI::dbExecute(con, glue::glue_sql("SET memory_limit = {limit_str};", .con = con))
+  DBI::dbExecute(con, glue::glue_sql("SET threads = {duckdb_threads};", .con = con))
   
   tryCatch({
     DBI::dbExecute(con, "LOAD spatial;")
@@ -117,7 +118,7 @@ convert_to_geoparquet <- function(source_path, geoparquet_path,
   wgs84 <- "+proj=longlat +datum=WGS84 +no_defs"
   
   # Get available columns to detect geometry and handles EXCLUDE
-  all_cols <- DBI::dbGetQuery(con, sprintf("SELECT * FROM ST_Read('%s') LIMIT 0", source_path))
+  all_cols <- DBI::dbGetQuery(con, glue::glue_sql("SELECT * FROM ST_Read({source_path}) LIMIT 0", .con = con))
   available_cols <- names(all_cols)
   
   # Auto-detect geometry column
@@ -130,12 +131,12 @@ convert_to_geoparquet <- function(source_path, geoparquet_path,
     # Try to find any geometry column
     for (col in available_cols) {
       test <- tryCatch({
-        DBI::dbGetQuery(con, sprintf("
-          SELECT ST_GeometryType(\"%s\") as gtype 
-          FROM ST_Read('%s') 
-          WHERE \"%s\" IS NOT NULL 
+        DBI::dbGetQuery(con, glue::glue_sql("
+          SELECT ST_GeometryType({`col`}) as gtype 
+          FROM ST_Read({source_path}) 
+          WHERE {`col`} IS NOT NULL 
           LIMIT 1
-        ", col, source_path, col))
+        ", .con = con))
       }, error = function(e) NULL)
       if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
         geom_col <- col
@@ -149,24 +150,25 @@ convert_to_geoparquet <- function(source_path, geoparquet_path,
   }
 
   # Build query - transform to WGS84 during conversion.
-  # We store as native DuckDB GEOMETRY type in the Parquet file.
-  # This allows the reader to reliably use ST_AsWKB later.
+  # Note: we use ST_AsWKB explicitly. This ensures the Parquet file contains 
+  # standards-compliant WKB blobs in a column named 'geometry'.
   exclude_list <- unique(c(geom_col, "Shape_Length"))
   exclude_list <- exclude_list[exclude_list %in% available_cols]
-  exclude_clause <- if (length(exclude_list) > 0) {
-    sprintf("EXCLUDE(%s)", paste(sprintf('"%s"', exclude_list), collapse = ", "))
+  
+  exclude_sql <- if (length(exclude_list) > 0) {
+    glue::glue_sql("EXCLUDE ({`exclude_list`*})", .con = con)
   } else {
-    ""
+    DBI::SQL("")
   }
 
-  query <- sprintf("
+  query <- glue::glue_sql("
     COPY (
       SELECT 
-        ST_Transform(ST_Force2D(\"%s\"), '%s', '%s') as geometry,
-        * %s
-      FROM ST_Read('%s')
-    ) TO '%s' (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 100000)
-  ", geom_col, sweref99_tm, wgs84, exclude_clause, source_path, geoparquet_path)
+        ST_AsWKB(ST_Transform(ST_Force2D({`geom_col`}), {sweref99_tm}, {wgs84})) as geometry,
+        * {exclude_sql}
+      FROM ST_Read({source_path})
+    ) TO {geoparquet_path} (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 100000)
+  ", .con = con)
   
   if (verbose) {
     cli::cli_alert_info("Converting {basename(source_path)} to GeoParquet...")

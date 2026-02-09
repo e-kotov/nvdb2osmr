@@ -69,8 +69,9 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   
   # Set resource limits
-  DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit_gb)))
-  DBI::dbExecute(con, sprintf("SET threads = %d;", duckdb_threads))
+  limit_str <- paste0(as.integer(duckdb_memory_limit_gb), "GB")
+  DBI::dbExecute(con, glue::glue_sql("SET memory_limit = {limit_str};", .con = con))
+  DBI::dbExecute(con, glue::glue_sql("SET threads = {duckdb_threads};", .con = con))
   
   # Install/load required extensions
   tryCatch({
@@ -84,18 +85,17 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   })
 
   # Build the filter
-  filter_expr <- if (!is.null(municipality_code)) {
-    sprintf("WHERE Kommu_141 = '%s'", municipality_code)
+  where_sql <- DBI::SQL("")
+  if (!is.null(municipality_code)) {
+    where_sql <- glue::glue_sql("WHERE Kommu_141 = {municipality_code}", .con = con)
   } else if (!is.null(county_code)) {
-    sprintf("WHERE Kommu_141 LIKE '%s%%'", county_code)
-  } else {
-    "" # Process whole file
+    where_sql <- glue::glue_sql("WHERE Kommu_141 LIKE {paste0(county_code, '%')}", .con = con)
   }
   
   # Build query based on input format
   if (is_geoparquet) {
     # GeoParquet: Get column list using read_parquet
-    all_cols <- DBI::dbGetQuery(con, sprintf("SELECT * FROM read_parquet('%s') LIMIT 0", gdb_path))
+    all_cols <- DBI::dbGetQuery(con, glue::glue_sql("SELECT * FROM read_parquet({gdb_path}) LIMIT 0", .con = con))
     available_cols <- names(all_cols)
     
     # Priority for geometry column names
@@ -108,12 +108,12 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
       # Try to find any column that DuckDB thinks is geometry
       for (col in available_cols) {
         test <- tryCatch({
-          DBI::dbGetQuery(con, sprintf("
-            SELECT ST_GeometryType(\"%s\") as gtype 
-            FROM read_parquet('%s') 
-            WHERE \"%s\" IS NOT NULL 
+          DBI::dbGetQuery(con, glue::glue_sql("
+            SELECT ST_GeometryType({`col`}) as gtype 
+            FROM read_parquet({gdb_path}) 
+            WHERE {`col`} IS NOT NULL 
             LIMIT 1
-          ", col, gdb_path, col))
+          ", .con = con))
         }, error = function(e) NULL)
         if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
           geom_col_in_parquet <- col
@@ -129,30 +129,23 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
     select_cols <- intersect(needed_cols, available_cols)
     # Ensure we don't include the geometry column in properties
     select_cols <- setdiff(select_cols, geom_col_in_parquet)
-    col_list <- paste(sprintf('"%s"', select_cols), collapse = ", ")
     
     # Robust WKB extraction:
-    # Use ST_AsWKB which returns WKB_BLOB.
-    # If the column is already a GEOMETRY, it works.
-    # If the column is a BLOB (WKB), we cast it to GEOMETRY via ST_GeomFromWKB first.
-    query <- sprintf("
+    # We cast to BLOB to get standard WKB bytes. 
+    # This works whether the source is a BLOB or a GEOMETRY object.
+    query <- glue::glue_sql("
       SELECT 
-        ST_AsWKB(
-          CASE 
-            WHEN TYPEOF(\"%s\") = 'BLOB' THEN ST_GeomFromWKB(\"%s\")
-            ELSE \"%s\"::GEOMETRY
-          END
-        ) as wkb,
-        %s
-      FROM read_parquet('%s')
-      %s
-    ", geom_col_in_parquet, geom_col_in_parquet, geom_col_in_parquet, col_list, gdb_path, filter_expr)
+        {`geom_col_in_parquet`}::BLOB as wkb,
+        {`select_cols`*}
+      FROM read_parquet({gdb_path})
+      {where_sql}
+    ", .con = con)
     
   } else {
     # GDB or GPKG: need to detect geometry column and transform
-    all_cols <- DBI::dbGetQuery(con, sprintf("
-      SELECT * FROM ST_Read('%s') LIMIT 0
-    ", gdb_path))
+    all_cols <- DBI::dbGetQuery(con, glue::glue_sql("
+      SELECT * FROM ST_Read({gdb_path}) LIMIT 0
+    ", .con = con))
     available_cols <- names(all_cols)
     
     # Auto-detect geometry column
@@ -165,12 +158,12 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
       # Try to find any geometry column
       for (col in available_cols) {
         test <- tryCatch({
-          DBI::dbGetQuery(con, sprintf("
-            SELECT ST_GeometryType(\"%s\") as gtype 
-            FROM ST_Read('%s') 
-            WHERE \"%s\" IS NOT NULL 
+          DBI::dbGetQuery(con, glue::glue_sql("
+            SELECT ST_GeometryType({`col`}) as gtype 
+            FROM ST_Read({gdb_path}) 
+            WHERE {`col`} IS NOT NULL 
             LIMIT 1
-          ", col, gdb_path, col))
+          ", .con = con))
         }, error = function(e) NULL)
         if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
           geom_col <- col
@@ -184,19 +177,18 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
     }
     
     select_cols <- intersect(needed_cols, available_cols)
-    col_list <- paste(sprintf('"%s"', select_cols), collapse = ", ")
     
     # Transform from SWEREF99 TM to WGS84
     sweref99_tm <- "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
     wgs84 <- "+proj=longlat +datum=WGS84 +no_defs"
     
-    query <- sprintf("
+    query <- glue::glue_sql("
       SELECT 
-        ST_AsWKB(ST_Transform(ST_Force2D(\"%s\"), '%s', '%s')) as wkb,
-        %s
-      FROM ST_Read('%s') 
-      %s
-    ", geom_col, sweref99_tm, wgs84, col_list, gdb_path, filter_expr)
+        ST_AsWKB(ST_Transform(ST_Force2D({`geom_col`}), {sweref99_tm}, {wgs84})) as wkb,
+        {`select_cols`*}
+      FROM ST_Read({gdb_path}) 
+      {where_sql}
+    ", .con = con)
   }
   
   df <- DBI::dbGetQuery(con, query)

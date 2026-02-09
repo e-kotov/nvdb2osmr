@@ -87,8 +87,9 @@ nvdb_to_pbf <- function(
     on.exit(if (!is.null(con)) DBI::dbDisconnect(con))
 
     # Set resource limits for discovery
-    DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit_gb)))
-    DBI::dbExecute(con, sprintf("SET threads = 1;")) # Discovery is light
+    limit_str <- paste0(as.integer(duckdb_memory_limit_gb), "GB")
+    DBI::dbExecute(con, glue::glue_sql("SET memory_limit = {limit_str};", .con = con))
+    DBI::dbExecute(con, glue::glue_sql("SET threads = 1;", .con = con))
 
     cli::cli_inform("  - Loading spatial extension...")
     tryCatch({
@@ -104,34 +105,34 @@ nvdb_to_pbf <- function(
     # Determine table reference based on source type
     is_geoparquet_source <- source_info$is_geoparquet
     if (is_geoparquet_source) {
-      table_ref <- sprintf("read_parquet('%s')", gdb_path)
+      table_ref <- glue::glue_sql("read_parquet({gdb_path})", .con = con)
     } else {
-      table_ref <- sprintf("ST_Read('%s')", gdb_path)
+      table_ref <- glue::glue_sql("ST_Read({gdb_path})", .con = con)
     }
 
     # Build the code selection logic
     if (split_by == "municipality") {
-      code_col <- "Kommu_141"
+      code_col <- DBI::SQL("Kommu_141")
       label <- "municipality"
     } else {
       # County code is the first 2 digits of the municipality code
-      code_col <- "SUBSTR(Kommu_141, 1, 2)"
+      code_col <- DBI::SQL("SUBSTR(Kommu_141, 1, 2)")
       label <- "county"
     }
 
     # Apply filters
-    where_clause <- ""
+    where_sql <- DBI::SQL("")
     if (!is.null(municipality_codes)) {
-      codes_str <- paste(sprintf("'%s'", municipality_codes), collapse = ", ")
-      where_clause <- sprintf("WHERE Kommu_141 IN (%s)", codes_str)
+      where_sql <- glue::glue_sql("WHERE Kommu_141 IN ({municipality_codes*})", .con = con)
     } else if (!is.null(county_codes)) {
-      # If filtering by county, but split_by is municipality, we still use LIKE
-      codes_str <- paste(sprintf("Kommu_141 LIKE '%s%%'", county_codes), collapse = " OR ")
-      where_clause <- sprintf("WHERE (%s)", codes_str)
+      like_exprs <- lapply(county_codes, function(x) {
+        glue::glue_sql("Kommu_141 LIKE {paste0(x, '%')}", .con = con)
+      })
+      where_sql <- glue::glue_sql("WHERE ({glue::glue_sql_collapse(like_exprs, sep = ' OR ')})", .con = con)
     }
 
-    query <- sprintf("SELECT DISTINCT %s as area_code FROM %s %s ORDER BY area_code", 
-                     code_col, table_ref, where_clause)
+    query <- glue::glue_sql("SELECT DISTINCT {code_col} as area_code FROM {table_ref} {where_sql} ORDER BY area_code", 
+                           .con = con)
     
     cli::cli_inform("  - Querying unique {label} codes...")
     codes <- DBI::dbGetQuery(con, query)$area_code
@@ -153,8 +154,8 @@ nvdb_to_pbf <- function(
       dir.create(temp_dir, showWarnings = FALSE)
 
       # Get segment counts for LPT scheduling
-      count_query <- sprintf("SELECT %s as area_code, COUNT(*) as n FROM %s %s GROUP BY area_code",
-                             code_col, table_ref, where_clause)
+      count_query <- glue::glue_sql("SELECT {code_col} as area_code, COUNT(*) as n FROM {table_ref} {where_sql} GROUP BY area_code",
+                                   .con = con)
       counts <- DBI::dbGetQuery(con, count_query)
 
       # Sort by count descending (LPT scheduling - largest first)
@@ -170,16 +171,14 @@ nvdb_to_pbf <- function(
         out_file <- file.path(temp_dir, sprintf("area_%s.gpkg", code))
         
         area_filter <- if (split_by == "municipality") {
-          sprintf("Kommu_141 = '%s'", code)
+          glue::glue_sql("Kommu_141 = {code}", .con = con)
         } else {
-          sprintf("Kommu_141 LIKE '%s%%'", code)
+          glue::glue_sql("Kommu_141 LIKE {paste0(code, '%')}", .con = con)
         }
 
-        query <- sprintf(
-          "COPY (SELECT * FROM %s WHERE %s) TO '%s' WITH (FORMAT GDAL, DRIVER 'GPKG')",
-          table_ref,
-          area_filter,
-          out_file
+        query <- glue::glue_sql(
+          "COPY (SELECT * FROM {table_ref} WHERE {area_filter}) TO {out_file} WITH (FORMAT GDAL, DRIVER 'GPKG')",
+          .con = con
         )
 
         tryCatch(
