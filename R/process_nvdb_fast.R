@@ -125,17 +125,28 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
     if (is.null(geom_col_in_parquet)) {
       stop("Could not detect geometry column in Parquet file: ", gdb_path)
     }
+
+    # RUNTIME TYPE CHECK:
+    # Check how DuckDB sees this column. This avoids Binder Errors by 
+    # ensuring we only use ST_AsWKB if the column is actually interpreted as a GEOMETRY.
+    type_info <- DBI::dbGetQuery(con, glue::glue_sql("DESCRIBE SELECT {`geom_col_in_parquet`} FROM read_parquet({gdb_path})", .con = con))
+    actual_type <- toupper(type_info$column_type[1])
+    
+    geom_sql <- if (actual_type == "GEOMETRY") {
+      # DuckDB automatically interpreted it as geometry, we must call ST_AsWKB
+      glue::glue_sql("ST_AsWKB({`geom_col_in_parquet`})", .con = con)
+    } else {
+      # It's a BLOB (WKB), read directly
+      glue::glue_sql("{`geom_col_in_parquet`}", .con = con)
+    }
     
     select_cols <- intersect(needed_cols, available_cols)
     # Ensure we don't include the geometry column in properties
     select_cols <- setdiff(select_cols, geom_col_in_parquet)
     
-    # Robust WKB extraction:
-    # We cast to BLOB to get standard WKB bytes. 
-    # This works whether the source is a BLOB or a GEOMETRY object.
     query <- glue::glue_sql("
       SELECT 
-        {`geom_col_in_parquet`}::BLOB as wkb,
+        {geom_sql} as wkb,
         {`select_cols`*}
       FROM read_parquet({gdb_path})
       {where_sql}
