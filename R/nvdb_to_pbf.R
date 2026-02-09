@@ -8,7 +8,7 @@
 #' @param use_geoparquet Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")
 #' @param presplit Logical: whether to pre-split to temp files (default: FALSE)
 #' @param max_retries Maximum retries for failed municipalities (default: 2)
-#' @param duckdb_memory_limit Memory limit for DuckDB in GB (numeric). Default 4.
+#' @param duckdb_memory_limit_gb Memory limit for DuckDB in GB (numeric). Default 4.
 #' @param duckdb_threads Number of threads for DuckDB. Default 1 (ideal for parallel runs).
 #' @details 
 #' This function supports parallel processing via the \code{mirai} package. 
@@ -30,7 +30,7 @@ nvdb_to_pbf <- function(
   use_geoparquet = "auto",
   presplit = FALSE,
   max_retries = 2,
-  duckdb_memory_limit = 4,
+  duckdb_memory_limit_gb = 4,
   duckdb_threads = 1
 ) {
   split_by <- match.arg(split_by)
@@ -51,8 +51,8 @@ nvdb_to_pbf <- function(
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
 
-  if (!is.numeric(duckdb_memory_limit)) {
-    stop("duckdb_memory_limit must be a number (Gigabytes)")
+  if (!is.numeric(duckdb_memory_limit_gb)) {
+    stop("duckdb_memory_limit_gb must be a number (Gigabytes)")
   }
 
   # Ensure mirai is available
@@ -71,7 +71,7 @@ nvdb_to_pbf <- function(
     input_path,
     use_geoparquet,
     output_pbf,
-    duckdb_memory_limit = duckdb_memory_limit,
+    duckdb_memory_limit_gb = duckdb_memory_limit_gb,
     duckdb_threads = duckdb_threads,
     verbose = TRUE
   )
@@ -87,7 +87,7 @@ nvdb_to_pbf <- function(
     on.exit(if (!is.null(con)) DBI::dbDisconnect(con))
 
     # Set resource limits for discovery
-    DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit)))
+    DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit_gb)))
     DBI::dbExecute(con, sprintf("SET threads = 1;")) # Discovery is light
 
     cli::cli_inform("  - Loading spatial extension...")
@@ -227,7 +227,7 @@ nvdb_to_pbf <- function(
 
   # --- 4. EXECUTION ---
   # Define worker function
-  process_area <- function(cfg, main_gdb, mem_limit, threads) {
+  process_area <- function(cfg, main_gdb, mem_limit_gb, threads) {
     code <- cfg$code
     source_file <- cfg$source_file
 
@@ -255,7 +255,7 @@ nvdb_to_pbf <- function(
           simplify_method = "refname",
           node_id_start = cfg$node_id_start,
           way_id_start = cfg$way_id_start,
-          duckdb_memory_limit = mem_limit,
+          duckdb_memory_limit_gb = mem_limit_gb,
           duckdb_threads = threads,
           verbose = FALSE
         )
@@ -303,7 +303,7 @@ nvdb_to_pbf <- function(
         process_area,
         .args = list(
           main_gdb = gdb_path,
-          mem_limit = duckdb_memory_limit,
+          mem_limit_gb = duckdb_memory_limit_gb,
           threads = duckdb_threads
         ),
         .progress = TRUE
@@ -354,7 +354,7 @@ nvdb_to_pbf <- function(
       process_area(
         cfg = cfg, 
         main_gdb = gdb_path, 
-        mem_limit = duckdb_memory_limit,
+        mem_limit_gb = duckdb_memory_limit_gb,
         threads = duckdb_threads
       )
     })

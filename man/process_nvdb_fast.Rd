@@ -12,7 +12,7 @@ process_nvdb_fast(
   simplify_method = "refname",
   node_id_start = 1L,
   way_id_start = 1L,
-  duckdb_memory_limit = 4,
+  duckdb_memory_limit_gb = 4,
   duckdb_threads = 1,
   verbose = TRUE
 )
@@ -33,7 +33,7 @@ Used if municipality_code is NULL.}
 
 \item{way_id_start}{Starting way ID for this chunk (default: 1)}
 
-\item{duckdb_memory_limit}{Memory limit for DuckDB in GB (numeric). Default 4.}
+\item{duckdb_memory_limit_gb}{Memory limit for DuckDB in GB (numeric). Default 4.}
 
 \item{duckdb_threads}{Number of threads for DuckDB. Default 1.}
 

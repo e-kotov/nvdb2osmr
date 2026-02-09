@@ -32,13 +32,13 @@ is_geoparquet_current <- function(source_path, geoparquet_path) {
 #' Ensure GeoParquet file exists, creating if necessary
 #' @param source_path Path to source file (GDB or GPKG)
 #' @param geoparquet_path Path to desired GeoParquet output
-#' @param duckdb_memory_limit Memory limit for DuckDB in GB (numeric)
+#' @param duckdb_memory_limit_gb Memory limit for DuckDB in GB (numeric)
 #' @param duckdb_threads Number of threads for DuckDB
 #' @param verbose Print progress messages
 #' @return Path to GeoParquet file (invisibly)
 #' @noRd
 ensure_geoparquet <- function(source_path, geoparquet_path, 
-                              duckdb_memory_limit = 4,
+                              duckdb_memory_limit_gb = 4,
                               duckdb_threads = 1,
                               verbose = TRUE) {
   if (file.exists(geoparquet_path) && is_geoparquet_current(source_path, geoparquet_path)) {
@@ -59,7 +59,7 @@ ensure_geoparquet <- function(source_path, geoparquet_path,
   convert_to_geoparquet(
     source_path, 
     geoparquet_path, 
-    duckdb_memory_limit = duckdb_memory_limit,
+    duckdb_memory_limit_gb = duckdb_memory_limit_gb,
     duckdb_threads = duckdb_threads,
     verbose = verbose
   )
@@ -87,19 +87,19 @@ ensure_geoparquet <- function(source_path, geoparquet_path,
 #' Convert source file to GeoParquet with pre-transformed WGS84 geometries
 #' @param source_path Path to source file (GDB or GPKG)
 #' @param geoparquet_path Path to output GeoParquet
-#' @param duckdb_memory_limit Memory limit for DuckDB in GB (numeric)
+#' @param duckdb_memory_limit_gb Memory limit for DuckDB in GB (numeric)
 #' @param duckdb_threads Number of threads for DuckDB
 #' @param verbose Print progress messages
 #' @noRd
 convert_to_geoparquet <- function(source_path, geoparquet_path, 
-                                  duckdb_memory_limit = 4,
+                                  duckdb_memory_limit_gb = 4,
                                   duckdb_threads = 1,
                                   verbose = TRUE) {
   con <- DBI::dbConnect(duckdb::duckdb())
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   
   # Set resource limits
-  DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit)))
+  DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit_gb)))
   DBI::dbExecute(con, sprintf("SET threads = %d;", duckdb_threads))
   
   tryCatch({
@@ -187,7 +187,7 @@ convert_to_geoparquet <- function(source_path, geoparquet_path,
 #' @param input_path Path to input file (GDB, GPKG, or GeoParquet)
 #' @param use_geoparquet "auto", TRUE, or FALSE
 #' @param output_pbf Path to output PBF (for determining GeoParquet location)
-#' @param duckdb_memory_limit Memory limit for DuckDB in GB (numeric)
+#' @param duckdb_memory_limit_gb Memory limit for DuckDB in GB (numeric)
 #' @param duckdb_threads Number of threads for DuckDB
 #' @param verbose Print progress messages
 #' @return List with path, is_geoparquet flag, and needs_cleanup flag
@@ -195,7 +195,7 @@ convert_to_geoparquet <- function(source_path, geoparquet_path,
 resolve_source <- function(input_path, 
                            use_geoparquet = "auto", 
                            output_pbf = NULL, 
-                           duckdb_memory_limit = 4,
+                           duckdb_memory_limit_gb = 4,
                            duckdb_threads = 1,
                            verbose = TRUE) {
   
@@ -251,7 +251,7 @@ resolve_source <- function(input_path,
   ensure_geoparquet(
     input_path, 
     geoparquet_path, 
-    duckdb_memory_limit = duckdb_memory_limit,
+    duckdb_memory_limit_gb = duckdb_memory_limit_gb,
     duckdb_threads = duckdb_threads,
     verbose = verbose
   )

@@ -8,7 +8,7 @@
 #' @param simplify_method Simplification method (default: "refname")
 #' @param node_id_start Starting node ID for this chunk (default: 1)
 #' @param way_id_start Starting way ID for this chunk (default: 1)
-#' @param duckdb_memory_limit Memory limit for DuckDB in GB (numeric). Default 4.
+#' @param duckdb_memory_limit_gb Memory limit for DuckDB in GB (numeric). Default 4.
 #' @param duckdb_threads Number of threads for DuckDB. Default 1.
 #' @param verbose Print progress messages (default: TRUE)
 #' @return Path to output PBF file (invisibly)
@@ -19,7 +19,7 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
                                simplify_method = "refname",
                                node_id_start = 1L,
                                way_id_start = 1L,
-                               duckdb_memory_limit = 4,
+                               duckdb_memory_limit_gb = 4,
                                duckdb_threads = 1,
                                verbose = TRUE) {
   
@@ -69,7 +69,7 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   
   # Set resource limits
-  DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit)))
+  DBI::dbExecute(con, sprintf("SET memory_limit = '%dGB';", as.integer(duckdb_memory_limit_gb)))
   DBI::dbExecute(con, sprintf("SET threads = %d;", duckdb_threads))
   
   # Install/load required extensions
