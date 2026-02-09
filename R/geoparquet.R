@@ -148,9 +148,9 @@ convert_to_geoparquet <- function(source_path, geoparquet_path,
     stop("Could not detect geometry column in source: ", source_path)
   }
 
-  # Build query - transform to WGS84 during conversion
-  # Note: ST_AsWKB is used to ensure the Parquet file contains standard WKB blobs.
-  # We exclude the original geometry and Shape_Length if it exists.
+  # Build query - transform to WGS84 during conversion.
+  # We store as native DuckDB GEOMETRY type in the Parquet file.
+  # This allows the reader to reliably use ST_AsWKB later.
   exclude_list <- unique(c(geom_col, "Shape_Length"))
   exclude_list <- exclude_list[exclude_list %in% available_cols]
   exclude_clause <- if (length(exclude_list) > 0) {
@@ -162,7 +162,7 @@ convert_to_geoparquet <- function(source_path, geoparquet_path,
   query <- sprintf("
     COPY (
       SELECT 
-        ST_AsWKB(ST_Transform(ST_Force2D(\"%s\"), '%s', '%s')) as geom_wkb,
+        ST_Transform(ST_Force2D(\"%s\"), '%s', '%s') as geometry,
         * %s
       FROM ST_Read('%s')
     ) TO '%s' (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 100000)

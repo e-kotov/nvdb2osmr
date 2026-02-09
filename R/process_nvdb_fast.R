@@ -98,12 +98,14 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
     all_cols <- DBI::dbGetQuery(con, sprintf("SELECT * FROM read_parquet('%s') LIMIT 0", gdb_path))
     available_cols <- names(all_cols)
     
-    # Check for our standard geometry column name
-    if ("geom_wkb" %in% available_cols) {
+    # Priority for geometry column names
+    geom_col_in_parquet <- NULL
+    if ("geometry" %in% available_cols) {
+      geom_col_in_parquet <- "geometry"
+    } else if ("geom_wkb" %in% available_cols) {
       geom_col_in_parquet <- "geom_wkb"
     } else {
-      # Try to find any column that might be geometry
-      geom_col_in_parquet <- NULL
+      # Try to find any column that DuckDB thinks is geometry
       for (col in available_cols) {
         test <- tryCatch({
           DBI::dbGetQuery(con, sprintf("
@@ -118,10 +120,10 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
           break
         }
       }
-      
-      if (is.null(geom_col_in_parquet)) {
-        stop("Could not detect geometry column in Parquet file: ", gdb_path)
-      }
+    }
+    
+    if (is.null(geom_col_in_parquet)) {
+      stop("Could not detect geometry column in Parquet file: ", gdb_path)
     }
     
     select_cols <- intersect(needed_cols, available_cols)
@@ -129,15 +131,22 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
     select_cols <- setdiff(select_cols, geom_col_in_parquet)
     col_list <- paste(sprintf('"%s"', select_cols), collapse = ", ")
     
-    # Note: we use ST_AsWKB(ST_GeomFromWKB(...)) to ensure standard WKB format.
-    # This handles cases where the column is stored as BLOB or already as GEOMETRY.
+    # Robust WKB extraction:
+    # Use ST_AsWKB which returns WKB_BLOB.
+    # If the column is already a GEOMETRY, it works.
+    # If the column is a BLOB (WKB), we cast it to GEOMETRY via ST_GeomFromWKB first.
     query <- sprintf("
       SELECT 
-        ST_AsWKB(ST_GeomFromWKB(\"%s\")) as wkb,
+        ST_AsWKB(
+          CASE 
+            WHEN TYPEOF(\"%s\") = 'BLOB' THEN ST_GeomFromWKB(\"%s\")
+            ELSE \"%s\"::GEOMETRY
+          END
+        ) as wkb,
         %s
       FROM read_parquet('%s')
       %s
-    ", geom_col_in_parquet, col_list, gdb_path, filter_expr)
+    ", geom_col_in_parquet, geom_col_in_parquet, geom_col_in_parquet, col_list, gdb_path, filter_expr)
     
   } else {
     # GDB or GPKG: need to detect geometry column and transform
