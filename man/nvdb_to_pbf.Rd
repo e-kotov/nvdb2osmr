@@ -13,7 +13,7 @@ nvdb_to_pbf(
   use_geoparquet = "auto",
   presplit = FALSE,
   max_retries = 2,
-  duckdb_memory_limit = "4GB",
+  duckdb_memory_limit = 4,
   duckdb_threads = 1
 )
 }
@@ -34,7 +34,7 @@ nvdb_to_pbf(
 
 \item{max_retries}{Maximum retries for failed municipalities (default: 2)}
 
-\item{duckdb_memory_limit}{Memory limit for DuckDB (e.g., "10GB"). Default "4GB".}
+\item{duckdb_memory_limit}{Memory limit for DuckDB in GB (numeric). Default 4.}
 
 \item{duckdb_threads}{Number of threads for DuckDB. Default 1 (ideal for parallel runs).}
 }
