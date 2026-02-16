@@ -1,7 +1,7 @@
 TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/release
 STATLIB = $(LIBDIR)/libnvdb2osmr.a
-PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
+PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lgcc_eh -lstdc++ -lpthread
 
 all: C_clean
 
