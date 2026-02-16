@@ -56,10 +56,19 @@ The package converts NVDB attributes to standard OSM tags including:
 This package requires **Rust** (to compile the core algorithm) and the **Osmium tool** (to merge and sort output files).
 
 ### 1. Rust
-The easiest way to install Rust is via [rustup](https://rustup.rs/):
 
+#### All Platforms
+Install Rust from [rustup.rs](https://rustup.rs/)
+
+**Linux/macOS:**
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+**Windows:**
+After installing Rust from [rustup.rs](https://rustup.rs/), run this additional command:
+```bash
+rustup default stable-x86_64-pc-windows-gnu
 ```
 
 Alternatively, on Linux (Ubuntu/Debian):

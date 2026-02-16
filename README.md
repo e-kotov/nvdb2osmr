@@ -63,55 +63,47 @@ The package converts NVDB attributes to standard OSM tags including:
 
 ## Prerequisites
 
-
-
-This package requires **Rust** (to compile the core algorithm) and the **Osmium tool** (to merge and sort output files).
-
-
+This package requires **Rust** (to compile the core algorithm) and the
+**Osmium tool** (to merge and sort output files).
 
 ### 1. Rust
 
-The easiest way to install Rust is via [rustup](https://rustup.rs/):
+#### All Platforms
 
+Install Rust from [rustup.rs](https://rustup.rs/)
 
+**Linux/macOS:**
 
-```bash
-
+``` bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
 ```
 
+**Windows:** After installing Rust from [rustup.rs](https://rustup.rs/),
+run this additional command:
 
+``` bash
+rustup default stable-x86_64-pc-windows-gnu
+```
 
 Alternatively, on Linux (Ubuntu/Debian):
 
-```bash
-
+``` bash
 sudo apt install cargo rustc
-
 ```
-
-
 
 ### 2. Osmium Tool
 
 Required for merging municipality PBF chunks into a single file.
 
-
-
 - **Linux**: `sudo apt install osmium-tool`
-
 - **macOS**: `brew install osmium-tool`
-
-- **Windows**: Download from [osmcode.org](https://osmcode.org/osmium-tool/)
-
-
+- **Windows**: Download from
+  [osmcode.org](https://osmcode.org/osmium-tool/)
 
 ## Installation
 
-
-
-You can install the development version of nvdb2osmr from [GitHub](https://github.com/) with:
+You can install the development version of nvdb2osmr from
+[GitHub](https://github.com/) with:
 
 ``` r
 # install.packages("pak")

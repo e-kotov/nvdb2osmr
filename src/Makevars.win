@@ -2,37 +2,35 @@ TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/release
 STATLIB = $(LIBDIR)/libnvdb2osmr.a
 
-# Detect R version to determine appropriate libraries
-R_VERSION := $(shell $(R_HOME)/bin/R --vanilla --slave -e "cat(paste(R.Version()[['major']], R.Version()[['minor']], sep='.'))")
-R_MAJOR := $(shell echo $(R_VERSION) | cut -d. -f1)
-R_MINOR := $(shell echo $(R_VERSION) | cut -d. -f2)
+STUB = rust_compat_stub.o
 
-# For R >= 4.5 (Rtools45), use -lgcc
-# For R 4.3-4.4 (Rtools43/44), use -lgcc_s -lgcc
-# For R 4.2 (Rtools42), use -lgcc_s -lgcc
-ifeq ($(shell test $(R_MAJOR) -eq 4 -a $(R_MINOR) -ge 5; echo $$?),0)
-    # R 4.5+ with Rtools45
-    PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lstdc++ -lgcc
-else
-    # R 4.2-4.4 with Rtools42/43/44
-    PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lstdc++ -lgcc_s -lgcc
-endif
+PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr $(STUB) -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lstdc++
 
 all: C_clean
 
-$(SHLIB): $(STATLIB)
+$(SHLIB): $(STATLIB) $(STUB)
+
+$(STUB):
+	@echo 'void __chkstk(void) {}' > stub_temp.c && \
+	echo 'void __GSHandlerCheck(void) {}' >> stub_temp.c && \
+	echo 'void __security_check_cookie(void) {}' >> stub_temp.c && \
+	echo 'void __security_init_cookie(void) {}' >> stub_temp.c && \
+	echo 'const void *type_info_vtable[2] = {0, 0};' >> stub_temp.c && \
+	gcc -c stub_temp.c -o stub_temp.o && \
+	objcopy --redefine-sym type_info_vtable='??_7type_info@@6B@' stub_temp.o $(STUB) && \
+	rm -f stub_temp.c stub_temp.o
 
 $(STATLIB):
-	# In some environments, ~/.cargo/bin might not be in PATH, so we need
-	# to set it here to ensure cargo can be found. See discussion in 
-	# https://github.com/extendr/rextendr/issues/145
-	export CARGO_HOME=$(CARGOTMP) && \
-		export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$(CARGO_LINKER)" && \
-		export LIBRARY_PATH="$(LIBRARY_PATH);$(MINGW_LIBS)" && \
-		cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
+	@if [ -z "$(RTOOLS_ROOT)" ]; then \
+		RTOOLS_LIB="C:/rtools45/x86_64-w64-mingw32.static.posix/lib"; \
+	else \
+		RTOOLS_LIB="$(RTOOLS_ROOT)/x86_64-w64-mingw32.static.posix/lib"; \
+	fi; \
+	export RUSTFLAGS="-C link-arg=-L$$RTOOLS_LIB $(RUSTFLAGS)"; \
+	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
 
 C_clean:
-	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS)
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(STUB)
 
 clean:
-	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR)
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR) $(STUB)
