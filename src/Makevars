@@ -17,6 +17,8 @@ $(STATLIB):
 		fi && \
 		export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$(CARGO_LINKER)" && \
 		export LIBRARY_PATH="$(LIBRARY_PATH);$(MINGW_LIBS)" && \
+		export CARGO_NET_RETRY=10 && \
+		export CARGO_HTTP_TIMEOUT=120 && \
 		cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
 
 C_clean:

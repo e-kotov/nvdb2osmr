@@ -2,23 +2,11 @@ TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/release
 STATLIB = $(LIBDIR)/libnvdb2osmr.a
 
-STUB = rust_compat_stub.o
-
-PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr $(STUB) -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lstdc++
+PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lstdc++
 
 all: C_clean
 
-$(SHLIB): $(STATLIB) $(STUB)
-
-$(STUB):
-	@echo 'void __chkstk(void) {}' > stub_temp.c && \
-	echo 'void __GSHandlerCheck(void) {}' >> stub_temp.c && \
-	echo 'void __security_check_cookie(void) {}' >> stub_temp.c && \
-	echo 'void __security_init_cookie(void) {}' >> stub_temp.c && \
-	echo 'const void *type_info_vtable[2] = {0, 0};' >> stub_temp.c && \
-	gcc -c stub_temp.c -o stub_temp.o && \
-	objcopy --redefine-sym type_info_vtable='??_7type_info@@6B@' stub_temp.o $(STUB) && \
-	rm -f stub_temp.c stub_temp.o
+$(SHLIB): $(STATLIB)
 
 $(STATLIB):
 	@if [ -z "$(RTOOLS_ROOT)" ]; then \
@@ -27,10 +15,12 @@ $(STATLIB):
 		RTOOLS_LIB="$(RTOOLS_ROOT)/x86_64-w64-mingw32.static.posix/lib"; \
 	fi; \
 	export RUSTFLAGS="-C link-arg=-L$$RTOOLS_LIB"; \
+	export CARGO_NET_RETRY=10; \
+	export CARGO_HTTP_TIMEOUT=120; \
 	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
 
 C_clean:
-	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(STUB)
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS)
 
 clean:
-	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR) $(STUB)
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR)
