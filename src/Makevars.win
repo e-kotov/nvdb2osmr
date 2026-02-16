@@ -1,7 +1,22 @@
 TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/release
 STATLIB = $(LIBDIR)/libnvdb2osmr.a
-PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lgcc_eh -lstdc++ -lpthread
+
+# Detect R version to determine appropriate libraries
+R_VERSION := $(shell $(R_HOME)/bin/R --vanilla --slave -e "cat(paste(R.Version()[['major']], R.Version()[['minor']], sep='.'))")
+R_MAJOR := $(shell echo $(R_VERSION) | cut -d. -f1)
+R_MINOR := $(shell echo $(R_VERSION) | cut -d. -f2)
+
+# For R >= 4.5 (Rtools45), use -lgcc
+# For R 4.3-4.4 (Rtools43/44), use -lgcc_s -lgcc
+# For R 4.2 (Rtools42), use -lgcc_s -lgcc
+ifeq ($(shell test $(R_MAJOR) -eq 4 -a $(R_MINOR) -ge 5; echo $$?),0)
+    # R 4.5+ with Rtools45
+    PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lstdc++ -lgcc
+else
+    # R 4.2-4.4 with Rtools42/43/44
+    PKG_LIBS = -L$(LIBDIR) -lnvdb2osmr -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll -lstdc++ -lgcc_s -lgcc
+endif
 
 all: C_clean
 
