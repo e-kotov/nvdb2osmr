@@ -26,7 +26,7 @@ $(STATLIB):
 	else \
 		RTOOLS_LIB="$(RTOOLS_ROOT)/x86_64-w64-mingw32.static.posix/lib"; \
 	fi; \
-	export RUSTFLAGS="-C link-arg=-L$$RTOOLS_LIB $(RUSTFLAGS)"; \
+	export RUSTFLAGS="-C link-arg=-L$$RTOOLS_LIB"; \
 	cargo build --lib --release --manifest-path=./rust/Cargo.toml --target-dir $(TARGET_DIR)
 
 C_clean:
