@@ -38,16 +38,16 @@ fn group_by_route(segment: &Segment) -> String {
 /// Group by ref + name + highway
 /// 
 /// EXACT port of Python lines 1778-1788:
-/// - ref or Driftbidrag statligt/Vägnr (road number for countryside)
+/// - ref or Vagnr_10370 (road number for countryside)
 /// - name
 /// - highway
 fn group_by_refname(segment: &Segment) -> String {
     let mut group_id = String::new();
     
-    // ref or Driftbidrag statligt/Vägnr (line 1779-1784)
+    // ref or Vagnr_10370 (line 1779-1784)
     if let Some(ref_val) = segment.tags.get("ref") {
         group_id.push_str(ref_val);
-    } else if let Some(vagnr) = segment.properties.get("Driftbidrag statligt/Vägnr") {
+    } else if let Some(vagnr) = segment.properties.get("Vagnr_10370") {
         group_id.push_str(&vagnr.as_string());
     }
     

@@ -9,7 +9,7 @@ mod grouping;
 mod tag_mapper;
 mod topology;
 
-use models::{Segment, Way, SimplifyMethod, CoordHash, PropertyValue};
+use models::{Segment, Way, NodeFeature, SimplifyMethod, CoordHash, PropertyValue};
 use pbf_craft::models::{Bound, Element, Node, Way as PbfWay, Tag, WayNode};
 use pbf_craft::writers::PbfWriter;
 
@@ -68,7 +68,7 @@ impl PreprocessedColumns {
     
     fn build_properties(&self, row_idx: usize) -> FxHashMap<String, PropertyValue> {
         let mut props = FxHashMap::default();
-        
+
         // Process string columns
         for (col_idx, values) in &self.string_cols {
             if row_idx < values.len() {
@@ -78,18 +78,25 @@ impl PreprocessedColumns {
                 }
             }
         }
-        
+
         // Process integer columns
         for (col_idx, values) in &self.int_cols {
             if row_idx < values.len() {
                 let val = values[row_idx];
                 // Check for NA (R uses INT_MIN for NA_INTEGER)
                 if val != i32::MIN {
-                    props.insert(self.names[*col_idx].clone(), PropertyValue::Integer(val as i64));
+                    // NVDB GDB boolean normalization: -1 means true, convert to 1
+                    // (matches Python load_file() lines 2237-2277)
+                    let normalized = if val == -1 && is_boolean_field(&self.names[*col_idx]) {
+                        1i64
+                    } else {
+                        val as i64
+                    };
+                    props.insert(self.names[*col_idx].clone(), PropertyValue::Integer(normalized));
                 }
             }
         }
-        
+
         // Process real columns
         for (col_idx, values) in &self.real_cols {
             if row_idx < values.len() {
@@ -97,7 +104,14 @@ impl PreprocessedColumns {
                 // Check for NA (NaN or a special value)
                 if !val.is_nan() {
                     let pv = if val == val.floor() {
-                        PropertyValue::Integer(val as i64)
+                        let int_val = val as i64;
+                        // NVDB GDB boolean normalization for real columns too
+                        let normalized = if int_val == -1 && is_boolean_field(&self.names[*col_idx]) {
+                            1i64
+                        } else {
+                            int_val
+                        };
+                        PropertyValue::Integer(normalized)
                     } else {
                         PropertyValue::Float(val)
                     };
@@ -105,7 +119,7 @@ impl PreprocessedColumns {
                 }
             }
         }
-        
+
         // Process logical columns
         for (col_idx, values) in &self.logical_cols {
             if row_idx < values.len() {
@@ -116,9 +130,31 @@ impl PreprocessedColumns {
                 }
             }
         }
-        
+
         props
     }
+}
+
+/// NVDB GDB boolean fields that use -1 for true (ESRI convention)
+/// Matches Python load_file() boolean_fields list (lines 2237-2277)
+fn is_boolean_field(name: &str) -> bool {
+    matches!(name,
+        "F_ForbudTrafik" | "B_ForbudTrafik" |
+        "F_ForbjudenFardriktning" | "B_ForbjudenFardriktning" |
+        "F_Cirkulationsplats" | "B_Cirkulationsplats" |
+        "TattbebyggtOmrade" |
+        "Farjeled" |
+        "Motorvag" | "Motortrafikled" |
+        "GCM_belyst" | "GCM_passage" |
+        "F_Omkorningsforbud" | "B_Omkorningsforbud" |
+        "L_Gagata" | "R_Gagata" |
+        "L_Gangfartsomrade" | "R_Gangfartsomrade" |
+        "Miljozon" |
+        "C_Rekbilvagcykeltrafik" |
+        "Rastplats" |
+        "L_Rastficka_2" | "R_Rastficka_2" |
+        "F_ATK_Matplats" | "B_ATK_Matplats"
+    )
 }
 
 /// Parse WKB (Well-Known Binary) geometry
@@ -355,12 +391,23 @@ fn process_nvdb_wkb(
     // Apply tags
     tag_mapper::tag_network(&mut segments);
     
+    // Generate nodes from segment properties (POIs like crossings, cameras, etc.)
+    let mut nodes: Vec<NodeFeature> = Vec::new();
+    let mut next_node_id = node_id_start;
+    
+    for segment in &segments {
+        let (segment_nodes, new_id) = tag_mapper::nodes::generate_nodes_for_segment(segment, next_node_id);
+        nodes.extend(segment_nodes);
+        next_node_id = new_id;
+    }
+    
     // Simplify network
     let method = SimplifyMethod::from(simplify_method.as_str());
     let ways = topology::simplify_network(&mut segments, method);
     
     // Write PBF using three-pass approach (nodes first, then ways)
-    match write_pbf_three_pass(&ways, &mut segments, &output_path, node_id_start, way_id_start) {
+    // Feature nodes are written before junction nodes
+    match write_pbf_three_pass(&ways, &mut segments, &nodes, &output_path, node_id_start, way_id_start) {
         Ok(_) => true,
         Err(e) => {
             eprintln!("Failed to write PBF: {}", e);
@@ -371,9 +418,12 @@ fn process_nvdb_wkb(
 
 /// Write ways to PBF file using three-pass approach (nodes first, then ways)
 /// This matches Python's behavior and ensures Osmium compatibility
+/// 
+/// UPDATED: Now also writes feature nodes (crossings, cameras, barriers, etc.)
 fn write_pbf_three_pass(
     ways: &[Way],
     segments: &mut [Segment],
+    feature_nodes: &[NodeFeature],
     output_path: &str,
     node_id_start: i64,
     way_id_start: i64,
@@ -381,7 +431,7 @@ fn write_pbf_three_pass(
     let mut writer = PbfWriter::from_path(output_path, true)
         .map_err(|e| format!("Failed to create writer: {}", e))?;
 
-    // Compute bounding box from all segment geometries
+    // Compute bounding box from all segment geometries and feature nodes
     let (mut min_lat, mut max_lat) = (f64::MAX, f64::MIN);
     let (mut min_lon, mut max_lon) = (f64::MAX, f64::MIN);
     for seg in segments.iter() {
@@ -391,6 +441,13 @@ fn write_pbf_three_pass(
             min_lon = min_lon.min(coord.x);
             max_lon = max_lon.max(coord.x);
         }
+    }
+    // Include feature nodes in bbox calculation
+    for node in feature_nodes {
+        min_lat = min_lat.min(node.lat);
+        max_lat = max_lat.max(node.lat);
+        min_lon = min_lon.min(node.lon);
+        max_lon = max_lon.max(node.lon);
     }
     writer.set_bbox(Bound {
         left: deg_to_nanodeg(min_lon),
@@ -402,6 +459,35 @@ fn write_pbf_three_pass(
 
     let mut node_id = node_id_start;
     let mut way_id = way_id_start;
+    
+    // NEW: Pass 0 - Write feature nodes (crossings, cameras, barriers, etc.)
+    for node in feature_nodes {
+        let tags: Vec<Tag> = node.tags
+            .iter()
+            .map(|(k, v)| Tag {
+                key: k.clone(),
+                value: v.clone(),
+            })
+            .collect();
+        
+        let pbf_node = Node {
+            id: node.id,
+            latitude: deg_to_nanodeg(node.lat),
+            longitude: deg_to_nanodeg(node.lon),
+            tags,
+            version: 0,
+            timestamp: None,
+            user: None,
+            changeset_id: 0,
+            visible: true,
+        };
+        let _ = writer.write(Element::Node(pbf_node));
+        
+        // Update node_id to be after all feature nodes
+        if node.id >= node_id {
+            node_id = node.id + 1;
+        }
+    }
     
     // Build junction index and assign junction node IDs
     let mut junction_ids: FxHashMap<CoordHash, i64> = FxHashMap::default();

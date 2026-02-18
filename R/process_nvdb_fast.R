@@ -12,6 +12,7 @@
 #' @param duckdb_threads Number of threads for DuckDB. Default 1.
 #' @param verbose Print progress messages (default: TRUE)
 #' @return Path to output PBF file (invisibly)
+#' @import glue
 #' @export
 process_nvdb_fast <- function(gdb_path, output_pbf, 
                                municipality_code = NULL,
@@ -49,16 +50,65 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   
   # Key columns needed for tag mapping
   needed_cols <- c(
+    # Highway classification
     "Motorvag", "Motortrafikled", "Klass_181",
+    # Surface and speed
     "Slitl_152",
-    "Hogst_36", "Hogst_46", "F_Hogst_24",
-    "Korfa_524", "F_ForbjudenFardriktning",
-    "Ident_191", "Konst_190", "Vagtr_474", "Farjeled",
-    "Namn_130", "Vagnr_10370", "Evag_555",
-    "Bredd_156",
-    "Typ_369",
-    "ROUTE_ID", "Driftbidrag statligt/Vägnr",
-    "Kommu_141"
+    "Hogst_36", "Hogst_46", "Hogst_55_30",  # Fordonsbredd, längd, axeltryck
+    "F_Hogst_24", "B_Hogst_24",  # Bruttovikt
+    "F_Hogst_225", "B_Hogst_225",  # Hastighetsgräns (speed limits)
+    # Direction and lanes
+    "Korfa_524", "Korfa_497",  # Körfältsanvändning + Antal körfält
+    "F_ForbjudenFardriktning", "B_ForbjudenFardriktning",
+    "F_Korfa_517", "B_Korfa_517",  # Kollektivkörfält
+    # Bridge and tunnel
+    "Ident_191", "Konst_190", "Namn_193", "Vagtr_474", "Farjeled", "Farje_139",
+    "Barig_64",  # Bärighet/Bärighetsklass (bridge load class)
+    # Names and refs
+    "Namn_130", "Namn_132", "Vagnr_10370", "Evag_555", "Huvnr_556_1",
+    "Undnr_557", "Lan_558",
+    # Width and type
+    "Bredd_156", "Typ_369", "Typ_512", "Vagty_41",
+    # Vehicle restrictions
+    "Fri_h_143",  # Höjdhinder
+    "Framk_161",  # Framkomlighetsklass
+    "F_Beskr_124", "B_Beskr_124",  # Farligt gods
+    "Rekom_185",  # Rekommenderad väg för farligt gods
+    "F_ForbudTrafik", "B_ForbudTrafik",  # Förbud mot trafik (motor_vehicle=no)
+    # Vehicle type restrictions (Förbud mot trafik/Gäller fordon)
+    "F_Gallar_135", "B_Gallar_135",
+    "F_Total_136", "B_Total_136",  # Totalvikt for vehicle restrictions
+    # Overtaking restrictions
+    "F_Omkorningsforbud", "B_Omkorningsforbud",
+    # Highway link detection (delivery quality)
+    "Lever_292",  # Leveranskvalitetsklass DoU 2017
+    "FPV_k_309",  # FPV-klass (highway link detection)
+    # Environment
+    "Miljozon",  # Low emission zone
+    "GCM_belyst",  # GCM-belyst (street lighting)
+    # Administrative
+    "ROUTE_ID", "Kommu_141", "Vagha_6", "Vagha_7", "Forva_9",
+    "Kateg_380", "Vagkl_564", "TattbebyggtOmrade",
+    "Tillg_169",  # Tillgänglighet/Tillgänglighetsklass (for track detection)
+    # Bicycle/pedestrian
+    "L_Gagata", "R_Gagata", "L_Gangfartsomrade", "R_Gangfartsomrade",
+    "GCM_passage", "GCM_belyst",
+    "L_Separ_500", "R_Separ_500", "GCM_t_502",
+    "C_Rekbilvagcykeltrafik", "C_Cykelled", "Namn_457",
+    "F_Cirkulationsplats", "B_Cirkulationsplats",  # Roundabout
+    # Traffic calming and barriers
+    "TypAv_82", "Hinde_72", "Passe_73",
+    "F_ATK_Matplats", "B_ATK_Matplats",
+    # GCM passage details
+    "Passa_85", "Trafi_86",  # Passagetyp, Trafikanttyp
+    # Railway crossings
+    "Vagsk_100",  # Vägskydd (railway crossing protection)
+    # Rest areas and parking
+    "Rastplats", "Rastp_118",  # Rastplats, Rastplatsnamn
+    "Antal_119", "Antal_122",  # Parking capacity (car, hgv)
+    "L_Rastficka_2", "R_Rastficka_2",  # Rastficka (V/H)
+    # Speed cameras
+    "F_ATK_Matplats_117", "B_ATK_Matplats_117"
   )
   
   # Progress function

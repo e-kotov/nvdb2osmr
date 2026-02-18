@@ -51,6 +51,14 @@ impl PropertyValue {
     }
 }
 
+/// Oneway direction (matches Python's oneway variable)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OnewayDirection {
+    None,
+    Forward,   // B_ForbjudenFardriktning=1 → backward forbidden → traffic goes forward
+    Backward,  // F_ForbjudenFardriktning=1 → forward forbidden → geometry reversed, traffic goes "backward" (original direction)
+}
+
 /// Road segment from NVDB
 #[derive(Debug, Clone)]
 pub struct Segment {
@@ -62,6 +70,8 @@ pub struct Segment {
     pub shape_length: f64,
     // Node IDs for internal coordinates (for PBF output)
     pub internal_node_ids: Vec<i64>,
+    /// Oneway direction after map_oneway() — used by tag_direction() helper
+    pub oneway_direction: OnewayDirection,
 }
 
 impl Segment {
@@ -78,6 +88,7 @@ impl Segment {
             properties: FxHashMap::default(),
             shape_length,
             internal_node_ids: Vec::new(),
+            oneway_direction: OnewayDirection::None,
         }
     }
     
@@ -121,6 +132,34 @@ pub struct Bridge {
     pub cycle_count: i32,
     pub length: f64,
     pub layer: String,
+    pub tag: String,  // "bridge" or "tunnel" - Python logic
+}
+
+/// Node feature (POI like crossings, speed cameras, barriers, etc.)
+/// Ported from Python create_node() function
+#[derive(Debug, Clone)]
+pub struct NodeFeature {
+    pub id: i64,
+    pub lat: f64,
+    pub lon: f64,
+    pub tags: FxHashMap<String, String>,
+}
+
+impl NodeFeature {
+    pub fn new(id: i64, lat: f64, lon: f64) -> Self {
+        Self {
+            id,
+            lat,
+            lon,
+            tags: FxHashMap::default(),
+        }
+    }
+    
+    pub fn add_tag(&mut self, key: &str, value: &str) {
+        if !value.is_empty() {
+            self.tags.insert(key.to_string(), value.to_string());
+        }
+    }
 }
 
 /// Simplification method

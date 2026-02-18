@@ -12,10 +12,14 @@ Imports:
     duckdb,
     jsonlite,
     mirai,
-    cli
-Suggests: 
+    cli,
+    glue
+Suggests:
     rosmium,
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    yaml
+Remotes:
+    e-kotov/rosmium@f1fe5d46ae78745dec4d8c667a509424993c6c81
 Config/testthat/edition: 3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
