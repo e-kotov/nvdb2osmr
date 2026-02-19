@@ -15,15 +15,16 @@ pub fn simplify_network(
     method: SimplifyMethod,
 ) -> Vec<Way> {
     // 1. Simplify segment geometries (Douglas-Peucker) - matches Python line 1726-1730
+    // NOTE: Python does NOT recompute start/end nodes after simplification.
+    // The original start/end nodes (set from pre-simplified coordinates) are preserved
+    // to ensure adjacent segments still share common node hashes.
     if SIMPLIFY_FACTOR > 0.0 {
         for segment in segments.iter_mut() {
             let simplified = simplify_polygon(&segment.geometry.0, SIMPLIFY_FACTOR);
             if simplified.len() >= 2 {
                 segment.geometry = geo_types::LineString::from(simplified);
-                // Update start/end nodes
-                use crate::models::hash_coord;
-                segment.start_node = hash_coord(segment.geometry.0.first().unwrap());
-                segment.end_node = hash_coord(segment.geometry.0.last().unwrap());
+                // KEEP original start_node and end_node - don't recompute from simplified geometry!
+                // Recomputing would cause coordinate mismatches with adjacent segments.
             }
         }
     }
@@ -201,54 +202,32 @@ fn simplify_linear(
                 }
             }
             
-            // First split at true junctions (3+ segments meeting across ALL groups)
-            // This ensures intersections are represented as way endpoints for OSRM
-            let mut junction_split_chains: Vec<Vec<usize>> = Vec::new();
-            if !way.is_empty() {
-                let mut current_chunk: Vec<usize> = Vec::new();
-                for (i, &seg_idx) in way.iter().enumerate() {
-                    current_chunk.push(seg_idx);
-                    if i < way.len() - 1 {
-                        let seg = &segments[seg_idx];
-                        if let Some(j) = junctions.get(&seg.end_node) {
-                            if j.segment_indices.len() >= 3 {
-                                junction_split_chains.push(current_chunk);
-                                current_chunk = Vec::new();
-                            }
-                        }
-                    }
-                }
-                if !current_chunk.is_empty() {
-                    junction_split_chains.push(current_chunk);
-                }
-            }
+            // MATCH PYTHON: Do NOT split at junctions. 
+            // Python does not split ways just because they cross an intersection.
+            // Only split if tags change.
 
-            // Then split each sub-chain by tags
-            // Matches Python lines 1697-1711
-            for chain in junction_split_chains {
-                let mut current_way = vec![chain[0]];
-                let mut current_tags = segments[chain[0]].tags.clone();
+            let mut current_way = vec![way[0]];
+            let mut current_tags = segments[way[0]].tags.clone();
 
-                for &seg_idx in &chain[1..] {
-                    let seg = &segments[seg_idx];
-                    if seg.tags == current_tags {
-                        current_way.push(seg_idx);
-                    } else {
-                        ways.push(Way {
-                            segment_indices: current_way,
-                            tags: current_tags,
-                        });
-                        current_way = vec![seg_idx];
-                        current_tags = seg.tags.clone();
-                    }
-                }
-
-                if !current_way.is_empty() {
+            for &seg_idx in &way[1..] {
+                let seg = &segments[seg_idx];
+                if seg.tags == current_tags {
+                    current_way.push(seg_idx);
+                } else {
                     ways.push(Way {
                         segment_indices: current_way,
                         tags: current_tags,
                     });
+                    current_way = vec![seg_idx];
+                    current_tags = seg.tags.clone();
                 }
+            }
+
+            if !current_way.is_empty() {
+                ways.push(Way {
+                    segment_indices: current_way,
+                    tags: current_tags,
+                });
             }
         }
     }

@@ -40,7 +40,7 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
   
-  valid_methods <- c("refname", "connected")
+  valid_methods <- c("refname", "connected", "route")
   if (!simplify_method %in% valid_methods) {
     stop("simplify_method must be one of: ", paste(valid_methods, collapse = ", "))
   }
@@ -200,6 +200,7 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
         {`select_cols`*}
       FROM read_parquet({gdb_path})
       {where_sql}
+      ORDER BY ROUTE_ID, FROM_MEASURE
     ", .con = con)
     
   } else {
@@ -237,27 +238,31 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
       stop("Could not detect geometry column in file: ", gdb_path)
     }
     
-    select_cols <- intersect(needed_cols, available_cols)
+    # Case-insensitive intersection
+    select_cols <- available_cols[tolower(available_cols) %in% tolower(needed_cols)]
     
     # Transform from SWEREF99 TM to WGS84
     sweref99_tm <- "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
     wgs84 <- "+proj=longlat +datum=WGS84 +no_defs"
     
+    # Transform and round in DuckDB if possible (using ST_AsWKB of transformed geom)
     query <- glue::glue_sql("
       SELECT 
         ST_AsWKB(ST_Transform(ST_Force2D({`geom_col`}), {sweref99_tm}, {wgs84})) as wkb,
         {`select_cols`*}
       FROM ST_Read({gdb_path}) 
       {where_sql}
+      ORDER BY ROUTE_ID, FROM_MEASURE
     ", .con = con)
   }
   
   df <- DBI::dbGetQuery(con, query)
-  msg("Read {nrow(df)} segments")
   
   if (nrow(df) == 0) {
     stop("No data found for area filter")
   }
+  
+  msg("Read {nrow(df)} segments (Sorted by ROUTE_ID and FROM_MEASURE)")
   
   # WKB is already in raw bytes from DuckDB
   msg("Preparing WKB data for Rust...")
@@ -265,10 +270,15 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   
   # Prepare properties as a named list of column vectors
   msg("Preparing properties...")
-  prop_cols <- setdiff(names(df), "wkb")
-  
+  # Exclude geometry column AND noisy columns that prevent merging
+  exclude_cols <- c("wkb", "Shape_Length", "FROM_MEASURE", "TO_MEASURE")
+  prop_cols <- setdiff(names(df), exclude_cols)
+    
   # Create a list of properties - each element is a column vector
   properties <- lapply(prop_cols, function(col) {
+    if (!(col %in% colnames(df))) {
+      return(NULL)
+    }
     vals <- df[[col]]
     if (is.character(vals) || is.factor(vals)) {
       as.character(vals)

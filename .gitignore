@@ -61,6 +61,4 @@ Cargo.lock
 *.osm
 *.osm.pbf
 
-# Cargo config (platform specific)
-src/.cargo/
 private

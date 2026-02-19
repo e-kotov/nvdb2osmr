@@ -204,6 +204,23 @@ fn parse_wkb(wkb: &[u8]) -> Option<LineString<f64>> {
     }
 }
 
+/// Round float to nearest integer, rounding half to even ("Banker's Rounding")
+/// Matches Python 3's round() function behavior
+fn round_ties_even(x: f64) -> f64 {
+    let fract = x.fract().abs();
+    if (fract - 0.5).abs() < f64::EPSILON {
+        // Exact half - round to even
+        let floor = x.floor();
+        if floor as i64 % 2 == 0 {
+            floor
+        } else {
+            x.ceil()
+        }
+    } else {
+        x.round()
+    }
+}
+
 fn parse_linestring_wkb(wkb: &[u8], offset: usize, little_endian: bool, coord_size: usize) -> Option<LineString<f64>> {
     if wkb.len() < offset + 4 {
         return None;
@@ -357,12 +374,12 @@ fn process_nvdb_wkb(
             continue;
         };
         
-        // Parse WKB and round coordinates to 7 decimal places
+        // Parse WKB and round coordinates to 7 decimal places using Banker's Rounding
         let geometry = match parse_wkb(&wkb_bytes) {
             Some(mut geom) => {
                 for coord in geom.0.iter_mut() {
-                    coord.x = (coord.x * 10_000_000.0).round() / 10_000_000.0;
-                    coord.y = (coord.y * 10_000_000.0).round() / 10_000_000.0;
+                    coord.x = round_ties_even(coord.x * 10_000_000.0) / 10_000_000.0;
+                    coord.y = round_ties_even(coord.y * 10_000_000.0) / 10_000_000.0;
                 }
                 geom
             }
@@ -375,7 +392,6 @@ fn process_nvdb_wkb(
             }
         };
 
-        
         // Build segment
         let mut seg = Segment::new(format!("seg_{}", i), geometry);
         seg.properties = preprocessed.build_properties(i);

@@ -11,6 +11,7 @@ nvdb_to_pbf(
   county_codes = NULL,
   split_by = c("municipality", "county", "none"),
   use_geoparquet = "auto",
+  simplify_method = "refname",
   presplit = FALSE,
   max_retries = 2,
   duckdb_memory_limit_gb = 4,
