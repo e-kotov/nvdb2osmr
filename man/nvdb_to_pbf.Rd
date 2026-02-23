@@ -48,8 +48,9 @@ Convert NVDB data to OSM PBF using parallel processing (WKB optimized)
 \details{
 This function supports parallel processing via the \code{mirai} package.
 To run in parallel, you must set up mirai daemons before calling this function,
-for example using \code{mirai::daemons(n_workers)}.
-If no daemons are active, processing will happen sequentially.
+for example using \code{mirai::daemons(4)}.
+To shut down daemons after processing, call \code{mirai::daemons(0)}.
+If no daemons are configured, processing will happen sequentially.
 
 Splitting by "municipality" is recommended for high-core counts as it provides
 more granular tasks (~290 tasks). "county" provides ~21 tasks.

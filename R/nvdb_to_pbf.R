@@ -1,3 +1,35 @@
+# Internal helper to interpret mirai daemon state for branching and logging.
+resolve_mirai_state <- function(daemons_configured, info) {
+  daemons_configured <- isTRUE(daemons_configured)
+
+  if (!daemons_configured) {
+    return(list(
+      daemons_configured = FALSE,
+      n_workers = 0L
+    ))
+  }
+
+  connections <- tryCatch(
+    info[["connections"]],
+    error = function(...) NULL
+  )
+  n_workers <- if (
+    is.numeric(connections) &&
+      length(connections) == 1L &&
+      !is.na(connections) &&
+      connections >= 0
+  ) {
+    as.integer(connections)
+  } else {
+    0L
+  }
+
+  list(
+    daemons_configured = TRUE,
+    n_workers = n_workers
+  )
+}
+
 #' Convert NVDB data to OSM PBF using parallel processing (WKB optimized)
 #'
 #' @param input_path Path to input file (.gdb, .gpkg, or .geoparquet)
@@ -13,8 +45,9 @@
 #' @details 
 #' This function supports parallel processing via the \code{mirai} package. 
 #' To run in parallel, you must set up mirai daemons before calling this function, 
-#' for example using \code{mirai::daemons(n_workers)}. 
-#' If no daemons are active, processing will happen sequentially.
+#' for example using \code{mirai::daemons(4)}. 
+#' To shut down daemons after processing, call \code{mirai::daemons(0)}.
+#' If no daemons are configured, processing will happen sequentially.
 #' 
 #' Splitting by "municipality" is recommended for high-core counts as it provides 
 #' more granular tasks (~290 tasks). "county" provides ~21 tasks. 
@@ -63,9 +96,13 @@ nvdb_to_pbf <- function(
     )
   }
 
-  # Check for active mirai daemons
-  status <- mirai::status()
-  daemons_active <- is.numeric(status$daemons) && status$daemons > 0
+  # Check configured mirai state via package-author interfaces.
+  mirai_state <- resolve_mirai_state(
+    daemons_configured = mirai::daemons_set(),
+    info = mirai::info()
+  )
+  daemons_configured <- mirai_state$daemons_configured
+  n_workers <- mirai_state$n_workers
 
   # --- 0. RESOLVE SOURCE (GDB/GPKG -> GeoParquet if needed) ---
   source_info <- resolve_source(
@@ -274,9 +311,13 @@ nvdb_to_pbf <- function(
     )
   }
 
-  if (daemons_active) {
+  if (daemons_configured) {
     # PARALLEL PATH
-    cli::cli_inform("Using {status$daemons} active mirai worker{?s}...")
+    if (n_workers > 0) {
+      cli::cli_inform("Using {n_workers} active mirai worker{?s}...")
+    } else {
+      cli::cli_inform("Using configured mirai daemons in sync mode...")
+    }
 
     # Export common data to all workers ONCE
     mirai::everywhere({
@@ -346,7 +387,7 @@ nvdb_to_pbf <- function(
       attempt <- attempt + 1
     }
   } else {
-    # SEQUENTIAL PATH (No active daemons)
+    # SEQUENTIAL PATH (No configured daemons)
     cli::cli_inform("No active mirai daemons found. Processing {length(codes)} areas sequentially...")
     start_time <- Sys.time()
     
