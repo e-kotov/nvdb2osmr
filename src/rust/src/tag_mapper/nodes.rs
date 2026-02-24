@@ -179,9 +179,9 @@ pub fn generate_nodes_for_segment(segment: &Segment, next_id: i64) -> (Vec<NodeF
     // 5. Speed Cameras (ATK-Mätplats)
     // Python lines 390-415
     let f_atk = segment.properties.get("F_ATK_Matplats").or_else(|| segment.properties.get("F_ATK_Matplats_117"))
-        .and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+        .map(|v| v.as_bool()).unwrap_or(false);
     let b_atk = segment.properties.get("B_ATK_Matplats").or_else(|| segment.properties.get("B_ATK_Matplats_117"))
-        .and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+        .map(|v| v.as_bool()).unwrap_or(false);
     
     if f_atk || b_atk {
         let mut tags = FxHashMap::default();
@@ -208,8 +208,8 @@ pub fn generate_nodes_for_segment(segment: &Segment, next_id: i64) -> (Vec<NodeF
     
     // 6. Rest Areas (Rastplats)
     // Python lines 417-440
-    if let Some(rastplats) = segment.properties.get("Rastplats").and_then(|v| v.as_i64()) {
-        if rastplats > 0 {
+    if let Some(rastplats_val) = segment.properties.get("Rastplats") {
+        if rastplats_val.as_bool() {
             let mut tags = FxHashMap::default();
             tags.insert("highway".to_string(), "rest_area".to_string());
             
@@ -242,8 +242,8 @@ pub fn generate_nodes_for_segment(segment: &Segment, next_id: i64) -> (Vec<NodeF
     
     // 7. Parking Along Highway (Rastficka)
     // Python lines 442-446
-    let l_rastficka = segment.properties.get("L_Rastficka_2").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
-    let r_rastficka = segment.properties.get("R_Rastficka_2").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+    let l_rastficka = segment.properties.get("L_Rastficka_2").map(|v| v.as_bool()).unwrap_or(false);
+    let r_rastficka = segment.properties.get("R_Rastficka_2").map(|v| v.as_bool()).unwrap_or(false);
     
     if l_rastficka || r_rastficka {
         let mut tags = FxHashMap::default();

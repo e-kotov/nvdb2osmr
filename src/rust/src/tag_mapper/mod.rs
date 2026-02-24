@@ -259,7 +259,7 @@ fn detect_missing_bridges(_segments: &mut [Segment], _bridges: &FxHashMap<String
 /// 4. Private roads / Service / Track
 fn map_highway(segment: &mut Segment, street_names: &std::collections::HashSet<String>) {
     // STEP 0: Check for ferry first (Python lines 452-480)
-    if segment.properties.get("Farjeled").and_then(|v| v.as_i64()).unwrap_or(0) > 0 {
+    if segment.properties.get("Farjeled").map(|v| v.as_bool()).unwrap_or(false) {
         segment.tags.insert("route".to_string(), "ferry".to_string());
         segment.tags.insert("foot".to_string(), "yes".to_string());
         // Motor vehicle access depends on network type
@@ -305,18 +305,18 @@ fn map_highway(segment: &mut Segment, street_names: &std::collections::HashSet<S
             }
         }
 
-        return;
+        return; // Fixed: Needs to return here so ferries don't get mapped to other highway types
     }
 
-    // Get network type - needed for cycleway/footway detection
+    // 1. Check for pedestrian/living street (original Python 638-643) needed for cycleway/footway detection
     let net_type = segment.properties.get("Vagtr_474").and_then(|v| v.as_i64()).unwrap_or(1);
 
     // STEP 1: Check for cycleway/footway based on network type (Python lines 528-619)
     if net_type == 2 || net_type == 4 {
         // Check for sidewalk FIRST (Python lines 563-570) — overrides GCM type
-        let l_separ = segment.properties.get("L_Separ_500").and_then(|v| v.as_i64()).unwrap_or(0);
-        let r_separ = segment.properties.get("R_Separ_500").and_then(|v| v.as_i64()).unwrap_or(0);
-        if l_separ == 1 || r_separ == 1 {
+        let l_separ = segment.properties.get("L_Separ_500").map(|v| v.as_bool()).unwrap_or(false);
+        let r_separ = segment.properties.get("R_Separ_500").map(|v| v.as_bool()).unwrap_or(false);
+        if l_separ || r_separ {
             segment.tags.insert("highway".to_string(), "footway".to_string());
             segment.tags.insert("footway".to_string(), "sidewalk".to_string());
         } else if let Some(gcm_typ) = segment.properties.get("GCM_t_502").and_then(|v| v.as_i64()) {
@@ -425,7 +425,7 @@ fn map_highway(segment: &mut Segment, street_names: &std::collections::HashSet<S
         }
 
         // GCM-belyst → lit=yes (Python line 598-599)
-        if segment.properties.get("GCM_belyst").and_then(|v| v.as_i64()).unwrap_or(0) > 0 {
+        if segment.properties.get("GCM_belyst").map(|v| v.as_bool()).unwrap_or(false) {
             if segment.tags.contains_key("highway") {
                 segment.tags.insert("lit".to_string(), "yes".to_string());
             }
@@ -486,15 +486,15 @@ fn map_highway(segment: &mut Segment, street_names: &std::collections::HashSet<S
     }
 
     // STEP 3: Check pedestrian streets and living streets
-    let l_gagata = segment.properties.get("L_Gagata").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
-    let r_gagata = segment.properties.get("R_Gagata").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+    let l_gagata = segment.properties.get("L_Gagata").map(|v| v.as_bool()).unwrap_or(false);
+    let r_gagata = segment.properties.get("R_Gagata").map(|v| v.as_bool()).unwrap_or(false);
     if l_gagata || r_gagata {
         segment.tags.insert("highway".to_string(), "pedestrian".to_string());
         return;
     }
 
-    let l_gangfart = segment.properties.get("L_Gangfartsomrade").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
-    let r_gangfart = segment.properties.get("R_Gangfartsomrade").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+    let l_gangfart = segment.properties.get("L_Gangfartsomrade").map(|v| v.as_bool()).unwrap_or(false);
+    let r_gangfart = segment.properties.get("R_Gangfartsomrade").map(|v| v.as_bool()).unwrap_or(false);
     if l_gangfart || r_gangfart {
         segment.tags.insert("highway".to_string(), "living_street".to_string());
         return;
@@ -519,7 +519,7 @@ fn map_highway(segment: &mut Segment, street_names: &std::collections::HashSet<S
         })
         .unwrap_or(false);
     let slitl = segment.properties.get("Slitl_152").and_then(|v| v.as_i64()).unwrap_or(0);
-    let tatt = segment.properties.get("TattbebyggtOmrade").and_then(|v| v.as_i64()).unwrap_or(0);
+    let tatt = segment.properties.get("TattbebyggtOmrade").map(|v| v.as_bool()).unwrap_or(false);
     // P4 FIX: Check Driftbidrag statligt/Vägnr (Python line 658)
     let has_vagnr = segment.properties.get("Vagnr_10370")
         .map(|v| {
@@ -531,7 +531,7 @@ fn map_highway(segment: &mut Segment, street_names: &std::collections::HashSet<S
     if vagha == 3 { // Private road owner
         // P4 FIX: Python line 655-661: klass < 8 OR Driftbidrag OR (klass==8 AND no tillg)
         if (klass > 0 && klass < 8) || has_vagnr || (klass == 8 && tillg == 0) {
-            if tatt == 1 || tatt == -1 { // Urban area
+            if tatt { // Urban area
                 segment.tags.insert("highway".to_string(), "residential".to_string());
             } else {
                 segment.tags.insert("highway".to_string(), "unclassified".to_string());
@@ -560,7 +560,7 @@ fn map_highway(segment: &mut Segment, street_names: &std::collections::HashSet<S
     }
 
     // STEP 6: Default to residential or unclassified (Python lines 678-680)
-    if tatt == 1 || tatt == -1 {
+    if tatt {
         segment.tags.insert("highway".to_string(), "residential".to_string());
     } else {
         segment.tags.insert("highway".to_string(), "unclassified".to_string());
@@ -570,9 +570,9 @@ fn map_highway(segment: &mut Segment, street_names: &std::collections::HashSet<S
 /// P1 FIX: Motorway/motorroad override (Python lines 684-688)
 /// Must run AFTER map_highway — overrides the category-based classification
 fn map_motorway_override(segment: &mut Segment) {
-    if segment.properties.get("Motorvag").and_then(|v| v.as_i64()).unwrap_or(0) > 0 {
+    if segment.properties.get("Motorvag").map(|v| v.as_bool()).unwrap_or(false) {
         segment.tags.insert("highway".to_string(), "motorway".to_string());
-    } else if segment.properties.get("Motortrafikled").and_then(|v| v.as_i64()).unwrap_or(0) > 0 {
+    } else if segment.properties.get("Motortrafikled").map(|v| v.as_bool()).unwrap_or(false) {
         segment.tags.insert("motorroad".to_string(), "yes".to_string());
     }
 }
@@ -585,15 +585,15 @@ fn map_bicycle_designated(segment: &mut Segment) {
     if net_type == 2 || net_type == 4 {
         return;
     }
-    if segment.properties.get("C_Rekbilvagcykeltrafik").and_then(|v| v.as_i64()) == Some(1) {
+    if segment.properties.get("C_Rekbilvagcykeltrafik").map(|v| v.as_bool()).unwrap_or(false) {
         segment.tags.insert("bicycle".to_string(), "designated".to_string());
     }
 }
 
 /// P13 FIX: Roundabout via tag_direction (Python lines 749-756)
 fn map_roundabout(segment: &mut Segment) {
-    let f_cirk = segment.properties.get("F_Cirkulationsplats").and_then(|v| v.as_i64());
-    let b_cirk = segment.properties.get("B_Cirkulationsplats").and_then(|v| v.as_i64());
+    let f_cirk = segment.properties.get("F_Cirkulationsplats").and_then(|v| if v.as_bool() { Some(1) } else { None });
+    let b_cirk = segment.properties.get("B_Cirkulationsplats").and_then(|v| if v.as_bool() { Some(1) } else { None });
     tag_direction(
         &mut segment.tags,
         segment.oneway_direction,
@@ -636,8 +636,8 @@ fn map_highway_links(segment: &mut Segment) {
     }
     
     // Check not a roundabout
-    let f_cirk = segment.properties.get("F_Cirkulationsplats").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
-    let b_cirk = segment.properties.get("B_Cirkulationsplats").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+    let f_cirk = segment.properties.get("F_Cirkulationsplats").map(|v| v.as_bool()).unwrap_or(false);
+    let b_cirk = segment.properties.get("B_Cirkulationsplats").map(|v| v.as_bool()).unwrap_or(false);
     if f_cirk || b_cirk {
         return;
     }
@@ -710,9 +710,9 @@ fn map_oneway(segment: &mut Segment) {
     // Python: if prop["Förbjuden färdriktning(B)"]: oneway = "forward"
     //         elif prop["Förbjuden färdriktning(F)"]: oneway = "backward"; reverse_segment
     let f_forbidden = segment.properties.get("F_ForbjudenFardriktning")
-        .and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+        .map(|v| v.as_bool()).unwrap_or(false);
     let b_forbidden = segment.properties.get("B_ForbjudenFardriktning")
-        .and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+        .map(|v| v.as_bool()).unwrap_or(false);
 
     if b_forbidden && !f_forbidden {
         // Backward direction forbidden → traffic flows forward → geometry correct
@@ -767,14 +767,14 @@ fn tag_direction(
     // Python: if value and prop_forward == 1: prop_forward = value
     let val_f = pf.map(|v| {
         if let Some(fixed_val) = value {
-            if v == 1 { fixed_val.to_string() } else { v.to_string() }
+            if v == 1 || v == -1 { fixed_val.to_string() } else { v.to_string() }
         } else {
             v.to_string()
         }
     });
     let val_b = pb.map(|v| {
         if let Some(fixed_val) = value {
-            if v == 1 { fixed_val.to_string() } else { v.to_string() }
+            if v == 1 || v == -1 { fixed_val.to_string() } else { v.to_string() }
         } else {
             v.to_string()
         }
@@ -917,8 +917,8 @@ fn map_name(segment: &mut Segment) {
     }
 
     // Skip if roundabout (Python lines 931-932)
-    let f_cirk = segment.properties.get("F_Cirkulationsplats").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
-    let b_cirk = segment.properties.get("B_Cirkulationsplats").and_then(|v| v.as_i64()).unwrap_or(0) > 0;
+    let f_cirk = segment.properties.get("F_Cirkulationsplats").map(|v| v.as_bool()).unwrap_or(false);
+    let b_cirk = segment.properties.get("B_Cirkulationsplats").map(|v| v.as_bool()).unwrap_or(false);
     if f_cirk || b_cirk {
         return;
     }
@@ -1094,7 +1094,7 @@ fn map_priority_road(segment: &mut Segment) {
 /// GCM-belyst = 1 means lit
 fn map_lit(segment: &mut Segment) {
     if let Some(belyst) = segment.properties.get("GCM_belyst") {
-        if belyst.as_i64() == Some(1) {
+        if belyst.as_bool() {
             segment.tags.insert("lit".to_string(), "yes".to_string());
         }
     }
@@ -1113,7 +1113,7 @@ fn map_motor_vehicle_access(segment: &mut Segment) {
 /// Now uses tag_direction for proper oneway handling
 fn map_hazmat(segment: &mut Segment) {
     // Check if recommended for hazardous goods (Python line 847-848)
-    if segment.properties.get("Rekom_185").and_then(|v| v.as_i64()).unwrap_or(0) > 0 {
+    if segment.properties.get("Rekom_185").map(|v| v.as_bool()).unwrap_or(false) {
         segment.tags.insert("hazmat".to_string(), "designated".to_string());
     }
 
@@ -1303,11 +1303,13 @@ fn map_overtaking_restrictions(segment: &mut Segment) {
 
 /// Map low emission zone
 fn map_low_emission_zone(segment: &mut Segment) {
-    if let Some(miljozon) = segment.properties.get("Miljozon").and_then(|v| v.as_i64()) {
-        if miljozon == 1 {
+    if let Some(miljozon_val) = segment.properties.get("Miljozon") {
+        if miljozon_val.as_bool() {
             segment.tags.insert("low_emission_zone".to_string(), "yes".to_string());
-        } else if miljozon > 1 {
-            segment.tags.insert("low_emission_zone".to_string(), miljozon.to_string());
+        } else if let Some(miljozon) = miljozon_val.as_i64() {
+             if miljozon > 1 {
+                segment.tags.insert("low_emission_zone".to_string(), miljozon.to_string());
+             }
         }
     }
 }

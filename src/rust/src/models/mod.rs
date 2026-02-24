@@ -49,6 +49,15 @@ impl PropertyValue {
             _ => None,
         }
     }
+    pub fn as_bool(&self) -> bool {
+        match self {
+            PropertyValue::Boolean(b) => *b,
+            PropertyValue::Integer(i) => *i == 1 || *i == -1,
+            PropertyValue::Float(f) => (*f - 1.0).abs() < f64::EPSILON || (*f - -1.0).abs() < f64::EPSILON,
+            PropertyValue::String(s) => s.eq_ignore_ascii_case("true") || s == "1" || s == "-1",
+            PropertyValue::Null => false,
+        }
+    }
 }
 
 /// Oneway direction (matches Python's oneway variable)
