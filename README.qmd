@@ -110,24 +110,30 @@ nvdb_to_pbf(
 Process multiple municipalities in parallel:
 
 ```r
-# Process several municipalities with automatic parallelization
+# Start mirai daemons before calling nvdb_to_pbf()
+mirai::daemons(4)
+on.exit(mirai::daemons(0), add = TRUE)
+
+# Process several municipalities in parallel
 nvdb_to_pbf(
   input_path = "path/to/nvdb_data.gdb",
   output_pbf = "output/region.osm.pbf",
-  municipality_codes = c("2480", "2580", "2581"),  # Umeå, Skellefteå, Piteå
-  n_workers = 4
+  municipality_codes = c("2480", "2580", "2581")  # Umeå, Skellefteå, Piteå
 )
 ```
 
 Process all municipalities in a dataset (e.g., full Sweden):
 
 ```r
+# Configure daemons based on available cores
+mirai::daemons(max(1L, parallel::detectCores() - 1L))
+on.exit(mirai::daemons(0), add = TRUE)
+
 # Process all municipalities automatically
 # For large datasets, GeoParquet optimization is applied automatically
 nvdb_to_pbf(
   input_path = "path/to/sweden_nvdb.gdb",
-  output_pbf = "output/sweden.osm.pbf",
-  n_workers = parallel::detectCores() - 1
+  output_pbf = "output/sweden.osm.pbf"
 )
 ```
 
@@ -144,3 +150,28 @@ nvdb_to_pbf(
   max_retries = 3          # Retry failed municipalities
 )
 ```
+
+## Split Processing and Global Node Prepass
+
+When you process by `split_by = "municipality"` or `split_by = "county"`,
+the converter can build a global endpoint-node dictionary to keep node IDs
+consistent across split boundaries.
+
+- `global_node_prepass = "auto"` (default): enabled for split runs, disabled for `split_by = "none"`.
+- `global_node_prepass = "on"`: force the prepass for split runs.
+- `global_node_prepass = "off"`: disable the prepass.
+
+This is recommended for large split runs where cross-boundary routing
+connectivity matters.
+
+```r
+nvdb_to_pbf(
+  input_path = "path/to/sweden_nvdb.gdb",
+  output_pbf = "output/sweden.osm.pbf",
+  split_by = "municipality",
+  global_node_prepass = "auto"
+)
+```
+
+Failure policy when prepass is active: all split chunks must succeed.
+If any area fails, the run aborts and no partial merged output is kept.

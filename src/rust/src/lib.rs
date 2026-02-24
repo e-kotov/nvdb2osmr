@@ -1,6 +1,7 @@
 use extendr_api::*;
 use rustc_hash::FxHashMap;
 use geo_types::{Coord, LineString};
+use std::collections::HashSet;
 
 // Module imports
 mod models;
@@ -323,6 +324,30 @@ fn read_f64(bytes: &[u8], little_endian: bool) -> f64 {
     }
 }
 
+fn get_i64_property(props: &FxHashMap<String, PropertyValue>, key: &str) -> Option<i64> {
+    props.get(key).and_then(|value| match value {
+        PropertyValue::Integer(i) => Some(*i),
+        PropertyValue::Float(f) => Some(*f as i64),
+        PropertyValue::String(s) => s.parse::<i64>().ok(),
+        PropertyValue::Boolean(b) => Some(if *b { 1 } else { 0 }),
+        PropertyValue::Null => None,
+    })
+}
+
+fn get_bool_property(props: &FxHashMap<String, PropertyValue>, key: &str) -> Option<bool> {
+    props.get(key).and_then(|value| match value {
+        PropertyValue::Boolean(b) => Some(*b),
+        PropertyValue::Integer(i) => Some(*i != 0),
+        PropertyValue::Float(f) => Some(*f != 0.0),
+        PropertyValue::String(s) => match s.to_lowercase().as_str() {
+            "1" | "true" | "t" | "yes" => Some(true),
+            "0" | "false" | "f" | "no" => Some(false),
+            _ => None,
+        },
+        PropertyValue::Null => None,
+    })
+}
+
 /// Process NVDB data with WKB geometries and direct R property columns
 /// 
 /// # Arguments
@@ -395,6 +420,10 @@ fn process_nvdb_wkb(
         // Build segment
         let mut seg = Segment::new(format!("seg_{}", i), geometry);
         seg.properties = preprocessed.build_properties(i);
+        seg.global_start_node_id = get_i64_property(&seg.properties, "global_start_node_id");
+        seg.global_end_node_id = get_i64_property(&seg.properties, "global_end_node_id");
+        seg.global_start_owned = get_bool_property(&seg.properties, "global_start_owned").unwrap_or(false);
+        seg.global_end_owned = get_bool_property(&seg.properties, "global_end_owned").unwrap_or(false);
         
         segments.push(seg);
     }
@@ -507,84 +536,116 @@ fn write_pbf_three_pass(
     
     // Build junction index and assign junction node IDs
     let mut junction_ids: FxHashMap<CoordHash, i64> = FxHashMap::default();
-    
+    let mut written_node_ids: HashSet<i64> = HashSet::new();
+
     // Pass 1: Identify all junction nodes (start/end of segments that are used in ways)
     // and assign them IDs
     for way in ways {
         if !way.segment_indices.is_empty() {
             let first_seg = &segments[way.segment_indices[0]];
             let last_seg = &segments[way.segment_indices[way.segment_indices.len() - 1]];
-            
+
             // Start junction of the way
             let start_hash = first_seg.start_node;
             if !junction_ids.contains_key(&start_hash) {
                 let coord = first_seg.start_coord();
-                let id = node_id;
-                node_id += 1;
-                junction_ids.insert(start_hash, id);
-                
-                let node = Node {
-                    id,
-                    latitude: deg_to_nanodeg(coord.y),
-                    longitude: deg_to_nanodeg(coord.x),
-                    tags: vec![],
-                    version: 0,
-                    timestamp: None,
-                    user: None,
-                    changeset_id: 0,
-                    visible: true,
+                let (id, should_write) = if let Some(global_id) = first_seg.global_start_node_id {
+                    (global_id, first_seg.global_start_owned)
+                } else {
+                    let local_id = node_id;
+                    node_id += 1;
+                    (local_id, true)
                 };
-                let _ = writer.write(Element::Node(node));
+                junction_ids.insert(start_hash, id);
+
+                if should_write && written_node_ids.insert(id) {
+                    let node = Node {
+                        id,
+                        latitude: deg_to_nanodeg(coord.y),
+                        longitude: deg_to_nanodeg(coord.x),
+                        tags: vec![],
+                        version: 0,
+                        timestamp: None,
+                        user: None,
+                        changeset_id: 0,
+                        visible: true,
+                    };
+                    let _ = writer.write(Element::Node(node));
+                }
             }
-            
+
             // End junction of the way
             let end_hash = last_seg.end_node;
             if !junction_ids.contains_key(&end_hash) {
                 let coord = last_seg.end_coord();
-                let id = node_id;
-                node_id += 1;
-                junction_ids.insert(end_hash, id);
-                
-                let node = Node {
-                    id,
-                    latitude: deg_to_nanodeg(coord.y),
-                    longitude: deg_to_nanodeg(coord.x),
-                    tags: vec![],
-                    version: 0,
-                    timestamp: None,
-                    user: None,
-                    changeset_id: 0,
-                    visible: true,
+                let (id, should_write) = if let Some(global_id) = last_seg.global_end_node_id {
+                    (global_id, last_seg.global_end_owned)
+                } else {
+                    let local_id = node_id;
+                    node_id += 1;
+                    (local_id, true)
                 };
-                let _ = writer.write(Element::Node(node));
+                junction_ids.insert(end_hash, id);
+
+                if should_write && written_node_ids.insert(id) {
+                    let node = Node {
+                        id,
+                        latitude: deg_to_nanodeg(coord.y),
+                        longitude: deg_to_nanodeg(coord.x),
+                        tags: vec![],
+                        version: 0,
+                        timestamp: None,
+                        user: None,
+                        changeset_id: 0,
+                        visible: true,
+                    };
+                    let _ = writer.write(Element::Node(node));
+                }
             }
         }
-        
+
         // Also need internal junctions (where segments connect within a way)
         for seg_indices in way.segment_indices.windows(2) {
             let seg1 = &segments[seg_indices[0]];
-            let _seg2 = &segments[seg_indices[1]];
-            
+            let seg2 = &segments[seg_indices[1]];
+
             // The junction between segments
-            let junction_hash = seg1.end_node; // or seg2.start_node
+            let junction_hash = seg1.end_node; // should match seg2.start_node
             if !junction_ids.contains_key(&junction_hash) {
                 let coord = seg1.end_coord();
-                let id = node_id;
-                node_id += 1;
-                junction_ids.insert(junction_hash, id);
-                
-                let node = Node {
-                    id,
-                    latitude: deg_to_nanodeg(coord.y),
-                    longitude: deg_to_nanodeg(coord.x),
-                    tags: vec![],
-                    version: 0,
-                    timestamp: None,
-                    user: None,
-                    changeset_id: 0,
-                    visible: true,
+                let chosen_global = match (seg1.global_end_node_id, seg2.global_start_node_id) {
+                    (Some(id1), Some(id2)) if id1 == id2 => {
+                        Some((id1, seg1.global_end_owned || seg2.global_start_owned))
+                    }
+                    (Some(id1), Some(_)) => Some((id1, seg1.global_end_owned)),
+                    (Some(id1), None) => Some((id1, seg1.global_end_owned)),
+                    (None, Some(id2)) => Some((id2, seg2.global_start_owned)),
+                    (None, None) => None,
                 };
-                let _ = writer.write(Element::Node(node));
+
+                let (id, should_write) = if let Some((global_id, owned)) = chosen_global {
+                    (global_id, owned)
+                } else {
+                    let local_id = node_id;
+                    node_id += 1;
+                    (local_id, true)
+                };
+                junction_ids.insert(junction_hash, id);
+
+                if should_write && written_node_ids.insert(id) {
+                    let node = Node {
+                        id,
+                        latitude: deg_to_nanodeg(coord.y),
+                        longitude: deg_to_nanodeg(coord.x),
+                        tags: vec![],
+                        version: 0,
+                        timestamp: None,
+                        user: None,
+                        changeset_id: 0,
+                        visible: true,
+                    };
+                    let _ = writer.write(Element::Node(node));
+                }
             }
         }
     }

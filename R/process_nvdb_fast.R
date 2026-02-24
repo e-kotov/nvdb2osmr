@@ -8,6 +8,12 @@
 #' @param simplify_method Simplification method (default: "refname")
 #' @param node_id_start Starting node ID for this chunk (default: 1)
 #' @param way_id_start Starting way ID for this chunk (default: 1)
+#' @param global_node_dict_path Optional path to global endpoint-node dictionary parquet.
+#'   If provided, per-segment start/end global node IDs are joined into the chunk.
+#' @param area_code Area code for this chunk (municipality or county code). Required
+#'   when \code{global_node_dict_path} is provided.
+#' @param prepass_rounding Rounding scheme for global node dictionary matching.
+#'   Currently only \code{"duckdb_1e7"} is supported.
 #' @param duckdb_memory_limit_gb Memory limit for DuckDB in GB (numeric). Default 4.
 #' @param duckdb_threads Number of threads for DuckDB. Default 1.
 #' @param verbose Print progress messages (default: TRUE)
@@ -22,7 +28,10 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
                                way_id_start = 1L,
                                duckdb_memory_limit_gb = 4,
                                duckdb_threads = 1,
-                               verbose = TRUE) {
+                               verbose = TRUE,
+                               global_node_dict_path = NULL,
+                               area_code = NULL,
+                               prepass_rounding = "duckdb_1e7") {
   
   # --- Input Validation ---
   if (!is.character(gdb_path) || length(gdb_path) != 1) {
@@ -43,6 +52,22 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   valid_methods <- c("refname", "connected", "route")
   if (!simplify_method %in% valid_methods) {
     stop("simplify_method must be one of: ", paste(valid_methods, collapse = ", "))
+  }
+
+  if (!is.null(global_node_dict_path)) {
+    if (!is.character(global_node_dict_path) || length(global_node_dict_path) != 1) {
+      stop("global_node_dict_path must be a single character string")
+    }
+    if (!file.exists(global_node_dict_path)) {
+      stop("Global node dictionary not found: ", global_node_dict_path)
+    }
+    if (is.null(area_code) || !is.character(area_code) || length(area_code) != 1) {
+      stop("area_code must be a single character string when global_node_dict_path is set")
+    }
+  }
+
+  if (!identical(prepass_rounding, "duckdb_1e7")) {
+    stop("prepass_rounding must be 'duckdb_1e7'")
   }
   
   # Detect input format
@@ -144,122 +169,186 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   
   # Build query based on input format
   if (is_geoparquet) {
-    # GeoParquet: Get column list using read_parquet
-    all_cols <- DBI::dbGetQuery(con, glue::glue_sql("SELECT * FROM read_parquet({gdb_path}) LIMIT 0", .con = con))
+    source_ref <- glue::glue_sql("read_parquet({gdb_path})", .con = con)
+    all_cols <- DBI::dbGetQuery(
+      con,
+      glue::glue_sql("SELECT * FROM {source_ref} LIMIT 0", .con = con)
+    )
     available_cols <- names(all_cols)
-    
-    # Priority for geometry column names
-    geom_col_in_parquet <- NULL
-    if ("geometry" %in% available_cols) {
-      geom_col_in_parquet <- "geometry"
-    } else if ("geom_wkb" %in% available_cols) {
-      geom_col_in_parquet <- "geom_wkb"
-    } else {
-      # Try to find any column that DuckDB thinks is geometry
-      for (col in available_cols) {
-        test <- tryCatch({
-          DBI::dbGetQuery(con, glue::glue_sql("
-            SELECT ST_GeometryType({`col`}) as gtype 
-            FROM read_parquet({gdb_path}) 
-            WHERE {`col`} IS NOT NULL 
-            LIMIT 1
-          ", .con = con))
-        }, error = function(e) NULL)
-        if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
-          geom_col_in_parquet <- col
-          break
-        }
-      }
-    }
-    
-    if (is.null(geom_col_in_parquet)) {
-      stop("Could not detect geometry column in Parquet file: ", gdb_path)
-    }
 
-    # RUNTIME TYPE CHECK:
-    # Check how DuckDB sees this column. This avoids Binder Errors by 
-    # ensuring we only use ST_AsWKB if the column is actually interpreted as a GEOMETRY.
-    type_info <- DBI::dbGetQuery(con, glue::glue_sql("DESCRIBE SELECT {`geom_col_in_parquet`} FROM read_parquet({gdb_path})", .con = con))
-    actual_type <- toupper(type_info$column_type[1])
-    
-    geom_sql <- if (actual_type == "GEOMETRY") {
-      # DuckDB automatically interpreted it as geometry, we must call ST_AsWKB
-      glue::glue_sql("ST_AsWKB({`geom_col_in_parquet`})", .con = con)
-    } else {
-      # It's a BLOB (WKB), read directly
-      glue::glue_sql("{`geom_col_in_parquet`}", .con = con)
-    }
-    
-    select_cols <- intersect(needed_cols, available_cols)
-    # Ensure we don't include the geometry column in properties
-    select_cols <- setdiff(select_cols, geom_col_in_parquet)
-    
-    query <- glue::glue_sql("
-      SELECT 
-        {geom_sql} as wkb,
-        {`select_cols`*}
-      FROM read_parquet({gdb_path})
-      {where_sql}
-      ORDER BY ROUTE_ID, FROM_MEASURE
-    ", .con = con)
-    
-  } else {
-    # GDB or GPKG: need to detect geometry column and transform
-    all_cols <- DBI::dbGetQuery(con, glue::glue_sql("
-      SELECT * FROM ST_Read({gdb_path}) LIMIT 0
-    ", .con = con))
-    available_cols <- names(all_cols)
-    
-    # Auto-detect geometry column
     geom_col <- NULL
-    if ("Shape" %in% available_cols) {
-      geom_col <- "Shape"
-    } else if ("geom" %in% available_cols) {
-      geom_col <- "geom"
+    if ("geometry" %in% available_cols) {
+      geom_col <- "geometry"
+    } else if ("geom_wkb" %in% available_cols) {
+      geom_col <- "geom_wkb"
     } else {
-      # Try to find any geometry column
       for (col in available_cols) {
-        test <- tryCatch({
-          DBI::dbGetQuery(con, glue::glue_sql("
-            SELECT ST_GeometryType({`col`}) as gtype 
-            FROM ST_Read({gdb_path}) 
-            WHERE {`col`} IS NOT NULL 
-            LIMIT 1
-          ", .con = con))
-        }, error = function(e) NULL)
+        test <- tryCatch(
+          DBI::dbGetQuery(
+            con,
+            glue::glue_sql(
+              "SELECT ST_GeometryType({`col`}) as gtype FROM {source_ref} WHERE {`col`} IS NOT NULL LIMIT 1",
+              .con = con
+            )
+          ),
+          error = function(...) NULL
+        )
         if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
           geom_col <- col
           break
         }
       }
     }
-    
+
+    if (is.null(geom_col)) {
+      stop("Could not detect geometry column in Parquet file: ", gdb_path)
+    }
+
+    type_info <- DBI::dbGetQuery(
+      con,
+      glue::glue_sql("DESCRIBE SELECT {`geom_col`} FROM {source_ref}", .con = con)
+    )
+    actual_type <- toupper(type_info$column_type[1])
+
+    geom_sql <- if (actual_type == "GEOMETRY") {
+      glue::glue_sql("ST_AsWKB({`geom_col`})", .con = con)
+    } else {
+      glue::glue_sql("{`geom_col`}", .con = con)
+    }
+
+    select_cols <- intersect(needed_cols, available_cols)
+    select_cols <- setdiff(select_cols, geom_col)
+  } else {
+    source_ref <- glue::glue_sql("ST_Read({gdb_path})", .con = con)
+    all_cols <- DBI::dbGetQuery(
+      con,
+      glue::glue_sql("SELECT * FROM {source_ref} LIMIT 0", .con = con)
+    )
+    available_cols <- names(all_cols)
+
+    geom_col <- NULL
+    if ("Shape" %in% available_cols) {
+      geom_col <- "Shape"
+    } else if ("geom" %in% available_cols) {
+      geom_col <- "geom"
+    } else {
+      for (col in available_cols) {
+        test <- tryCatch(
+          DBI::dbGetQuery(
+            con,
+            glue::glue_sql(
+              "SELECT ST_GeometryType({`col`}) as gtype FROM {source_ref} WHERE {`col`} IS NOT NULL LIMIT 1",
+              .con = con
+            )
+          ),
+          error = function(...) NULL
+        )
+        if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
+          geom_col <- col
+          break
+        }
+      }
+    }
+
     if (is.null(geom_col)) {
       stop("Could not detect geometry column in file: ", gdb_path)
     }
-    
-    # Case-insensitive intersection
+
     select_cols <- available_cols[tolower(available_cols) %in% tolower(needed_cols)]
-    
-    # Transform from SWEREF99 TM to WGS84
+
     sweref99_tm <- "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
     wgs84 <- "+proj=longlat +datum=WGS84 +no_defs"
-    
-    # Transform and round in DuckDB if possible (using ST_AsWKB of transformed geom)
-    query <- glue::glue_sql("
-      SELECT 
-        ST_AsWKB(ST_Transform(ST_Force2D({`geom_col`}), {sweref99_tm}, {wgs84})) as wkb,
-        {`select_cols`*}
-      FROM ST_Read({gdb_path}) 
-      {where_sql}
+    geom_sql <- glue::glue_sql(
+      "ST_AsWKB(ST_Transform(ST_Force2D({`geom_col`}), {sweref99_tm}, {wgs84}))",
+      .con = con
+    )
+  }
+
+  # Keep measure columns for ordering, but strip later from Rust properties.
+  select_cols <- unique(c(
+    select_cols,
+    intersect(c("FROM_MEASURE", "TO_MEASURE"), available_cols)
+  ))
+
+  base_query <- glue::glue_sql(
+    "
+    SELECT
+      {geom_sql} as wkb,
+      {`select_cols`*}
+    FROM {source_ref}
+    {where_sql}
+    ",
+    .con = con
+  )
+
+  if (is.null(global_node_dict_path)) {
+    query <- glue::glue_sql(
+      "
+      SELECT *
+      FROM ({base_query}) AS base
       ORDER BY ROUTE_ID, FROM_MEASURE
-    ", .con = con)
+      ",
+      .con = con
+    )
+  } else {
+    dict_ref <- glue::glue_sql("read_parquet({global_node_dict_path})", .con = con)
+    area_code_value <- as.character(area_code)
+
+    query <- glue::glue_sql(
+      "
+      WITH base AS (
+        {base_query}
+      ),
+      keyed AS (
+        SELECT
+          base.*,
+          CAST(ROUND(ST_X(ST_StartPoint(ST_LineMerge(ST_GeomFromWKB(base.wkb)))) * 10000000) AS BIGINT) AS sx7,
+          CAST(ROUND(ST_Y(ST_StartPoint(ST_LineMerge(ST_GeomFromWKB(base.wkb)))) * 10000000) AS BIGINT) AS sy7,
+          CAST(ROUND(ST_X(ST_EndPoint(ST_LineMerge(ST_GeomFromWKB(base.wkb)))) * 10000000) AS BIGINT) AS ex7,
+          CAST(ROUND(ST_Y(ST_EndPoint(ST_LineMerge(ST_GeomFromWKB(base.wkb)))) * 10000000) AS BIGINT) AS ey7
+        FROM base
+      )
+      SELECT
+        keyed.wkb,
+        {`select_cols`*},
+        dstart.global_node_id AS global_start_node_id,
+        CASE WHEN dstart.owner_area = {area_code_value} THEN 1 ELSE 0 END AS global_start_owned,
+        dend.global_node_id AS global_end_node_id,
+        CASE WHEN dend.owner_area = {area_code_value} THEN 1 ELSE 0 END AS global_end_owned
+      FROM keyed
+      LEFT JOIN {dict_ref} AS dstart
+        ON keyed.sx7 = dstart.x7 AND keyed.sy7 = dstart.y7
+      LEFT JOIN {dict_ref} AS dend
+        ON keyed.ex7 = dend.x7 AND keyed.ey7 = dend.y7
+      ORDER BY ROUTE_ID, FROM_MEASURE
+      ",
+      .con = con
+    )
   }
   
   df <- DBI::dbGetQuery(con, query)
   
   if (nrow(df) == 0) {
     stop("No data found for area filter")
+  }
+
+  if (!is.null(global_node_dict_path)) {
+    missing_start <- sum(is.na(df$global_start_node_id))
+    missing_end <- sum(is.na(df$global_end_node_id))
+    if (missing_start > 0 || missing_end > 0) {
+      stop(
+        "Global node dictionary join failed for area ",
+        area_code,
+        " (missing start ids: ",
+        missing_start,
+        ", missing end ids: ",
+        missing_end,
+        ")"
+      )
+    }
+    msg(
+      "Global node prepass join complete for area {area_code}: {sum(df$global_start_owned == 1L | df$global_end_owned == 1L)} owned endpoint references"
+    )
   }
   
   msg("Read {nrow(df)} segments (Sorted by ROUTE_ID and FROM_MEASURE)")

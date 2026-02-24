@@ -64,6 +64,10 @@ pub enum OnewayDirection {
 pub struct Segment {
     pub start_node: CoordHash,
     pub end_node: CoordHash,
+    pub global_start_node_id: Option<i64>,
+    pub global_end_node_id: Option<i64>,
+    pub global_start_owned: bool,
+    pub global_end_owned: bool,
     pub geometry: LineString<f64>,
     pub tags: FxHashMap<String, String>,
     pub properties: FxHashMap<String, PropertyValue>,
@@ -83,6 +87,10 @@ impl Segment {
         Self {
             start_node,
             end_node,
+            global_start_node_id: None,
+            global_end_node_id: None,
+            global_start_owned: false,
+            global_end_owned: false,
             geometry,
             tags: FxHashMap::default(),
             properties: FxHashMap::default(),

@@ -30,6 +30,207 @@ resolve_mirai_state <- function(daemons_configured, info) {
   )
 }
 
+build_area_where_sql <- function(con, municipality_codes, county_codes) {
+  if (!is.null(municipality_codes)) {
+    return(glue::glue_sql(
+      "WHERE Kommu_141 IN ({municipality_codes*})",
+      .con = con
+    ))
+  }
+
+  if (!is.null(county_codes)) {
+    like_exprs <- lapply(county_codes, function(x) {
+      glue::glue_sql("Kommu_141 LIKE {paste0(x, '%')}", .con = con)
+    })
+    return(glue::glue_sql(
+      "WHERE ({glue::glue_sql_collapse(like_exprs, sep = ' OR ')})",
+      .con = con
+    ))
+  }
+
+  DBI::SQL("")
+}
+
+detect_prepass_geometry_expr <- function(con, source_path, is_geoparquet_source) {
+  if (is_geoparquet_source) {
+    all_cols <- DBI::dbGetQuery(
+      con,
+      glue::glue_sql(
+        "SELECT * FROM read_parquet({source_path}) LIMIT 0",
+        .con = con
+      )
+    )
+    available_cols <- names(all_cols)
+
+    geom_col <- NULL
+    if ("geometry" %in% available_cols) {
+      geom_col <- "geometry"
+    } else if ("geom_wkb" %in% available_cols) {
+      geom_col <- "geom_wkb"
+    } else {
+      for (col in available_cols) {
+        test <- tryCatch(
+          DBI::dbGetQuery(
+            con,
+            glue::glue_sql(
+              "SELECT ST_GeometryType({`col`}) as gtype FROM read_parquet({source_path}) WHERE {`col`} IS NOT NULL LIMIT 1",
+              .con = con
+            )
+          ),
+          error = function(...) NULL
+        )
+        if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
+          geom_col <- col
+          break
+        }
+      }
+    }
+
+    if (is.null(geom_col)) {
+      stop(
+        "Could not detect geometry column for global node prepass in ",
+        source_path
+      )
+    }
+
+    type_info <- DBI::dbGetQuery(
+      con,
+      glue::glue_sql(
+        "DESCRIBE SELECT {`geom_col`} FROM read_parquet({source_path})",
+        .con = con
+      )
+    )
+    actual_type <- toupper(type_info$column_type[1])
+
+    if (actual_type == "GEOMETRY") {
+      return(glue::glue_sql("{`geom_col`}", .con = con))
+    }
+    return(glue::glue_sql("ST_GeomFromWKB({`geom_col`})", .con = con))
+  }
+
+  all_cols <- DBI::dbGetQuery(
+    con,
+    glue::glue_sql("SELECT * FROM ST_Read({source_path}) LIMIT 0", .con = con)
+  )
+  available_cols <- names(all_cols)
+
+  geom_col <- NULL
+  if ("Shape" %in% available_cols) {
+    geom_col <- "Shape"
+  } else if ("geom" %in% available_cols) {
+    geom_col <- "geom"
+  } else {
+    for (col in available_cols) {
+      test <- tryCatch(
+        DBI::dbGetQuery(
+          con,
+          glue::glue_sql(
+            "SELECT ST_GeometryType({`col`}) as gtype FROM ST_Read({source_path}) WHERE {`col`} IS NOT NULL LIMIT 1",
+            .con = con
+          )
+        ),
+        error = function(...) NULL
+      )
+      if (!is.null(test) && nrow(test) > 0 && !is.na(test$gtype[1])) {
+        geom_col <- col
+        break
+      }
+    }
+  }
+
+  if (is.null(geom_col)) {
+    stop(
+      "Could not detect geometry column for global node prepass in ",
+      source_path
+    )
+  }
+
+  sweref99_tm <- "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs"
+  wgs84 <- "+proj=longlat +datum=WGS84 +no_defs"
+
+  glue::glue_sql(
+    "ST_Transform(ST_Force2D({`geom_col`}), {sweref99_tm}, {wgs84})",
+    .con = con
+  )
+}
+
+build_global_node_prepass_dictionary <- function(
+  con,
+  table_ref,
+  where_sql,
+  area_code_col,
+  geometry_expr,
+  dict_dir
+) {
+  dict_path <- file.path(dict_dir, "global_node_dictionary.parquet")
+
+  dict_query <- glue::glue_sql(
+    "
+    WITH endpoints AS (
+      SELECT
+        CAST({area_code_col} AS VARCHAR) AS area_code,
+        CAST(ROUND(ST_X(ST_StartPoint(ST_LineMerge({geometry_expr}))) * 10000000) AS BIGINT) AS sx7,
+        CAST(ROUND(ST_Y(ST_StartPoint(ST_LineMerge({geometry_expr}))) * 10000000) AS BIGINT) AS sy7,
+        CAST(ROUND(ST_X(ST_EndPoint(ST_LineMerge({geometry_expr}))) * 10000000) AS BIGINT) AS ex7,
+        CAST(ROUND(ST_Y(ST_EndPoint(ST_LineMerge({geometry_expr}))) * 10000000) AS BIGINT) AS ey7
+      FROM {table_ref}
+      {where_sql}
+    ),
+    points AS (
+      SELECT area_code, sx7 AS x7, sy7 AS y7 FROM endpoints
+      UNION ALL
+      SELECT area_code, ex7 AS x7, ey7 AS y7 FROM endpoints
+    ),
+    filtered AS (
+      SELECT area_code, x7, y7
+      FROM points
+      WHERE x7 IS NOT NULL AND y7 IS NOT NULL
+    ),
+    grouped AS (
+      SELECT
+        x7,
+        y7,
+        MIN(area_code) AS owner_area,
+        COUNT(DISTINCT area_code) AS area_count
+      FROM filtered
+      GROUP BY x7, y7
+    )
+    SELECT
+      x7,
+      y7,
+      CAST(1000000000000 + ROW_NUMBER() OVER (ORDER BY x7, y7) AS BIGINT) AS global_node_id,
+      owner_area,
+      area_count
+    FROM grouped
+    ",
+    .con = con
+  )
+
+  DBI::dbExecute(
+    con,
+    glue::glue_sql(
+      "COPY ({dict_query}) TO {dict_path} (FORMAT PARQUET)",
+      .con = con
+    )
+  )
+
+  stats <- DBI::dbGetQuery(
+    con,
+    glue::glue_sql(
+      "
+      SELECT
+        COUNT(*) AS n_total,
+        SUM(CASE WHEN area_count > 1 THEN 1 ELSE 0 END) AS n_shared,
+        MAX(area_count) AS max_area_count
+      FROM read_parquet({dict_path})
+      ",
+      .con = con
+    )
+  )
+
+  list(path = dict_path, stats = stats[1, ])
+}
+
 #' Convert NVDB data to OSM PBF using parallel processing (WKB optimized)
 #'
 #' @param input_path Path to input file (.gdb, .gpkg, or .geoparquet)
@@ -38,6 +239,8 @@ resolve_mirai_state <- function(daemons_configured, info) {
 #' @param county_codes Optional vector of 2-digit county codes to process (e.g., "01" for Stockholm)
 #' @param split_by Strategy for splitting the work: "municipality" (default), "county", or "none" (process whole file in one go).
 #' @param use_geoparquet Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")
+#' @param global_node_prepass Whether to build a global endpoint-node dictionary before split processing.
+#'   One of "auto" (default; enabled for split mode), "on", or "off".
 #' @param presplit Logical: whether to pre-split to temp files (default: FALSE)
 #' @param max_retries Maximum retries for failed municipalities (default: 2)
 #' @param duckdb_memory_limit_gb Memory limit for DuckDB in GB (numeric). Default 4.
@@ -61,6 +264,7 @@ nvdb_to_pbf <- function(
   county_codes = NULL,
   split_by = c("municipality", "county", "none"),
   use_geoparquet = "auto",
+  global_node_prepass = c("auto", "on", "off"),
   simplify_method = "refname",
   presplit = FALSE,
   max_retries = 2,
@@ -68,6 +272,7 @@ nvdb_to_pbf <- function(
   duckdb_threads = 1
 ) {
   split_by <- match.arg(split_by)
+  global_node_prepass <- match.arg(global_node_prepass)
 
   # --- Input Validation ---
   if (!is.character(input_path) || length(input_path) != 1) {
@@ -114,10 +319,15 @@ nvdb_to_pbf <- function(
     verbose = TRUE
   )
   gdb_path <- source_info$path # This is the path to use (may be GeoParquet)
+  use_global_prepass <- FALSE
+  global_prepass_dir <- NULL
+  global_node_dict_path <- NULL
 
   # --- 1. DISCOVERY ---
   temp_dir <- NULL
   if (split_by != "none") {
+    use_global_prepass <- global_node_prepass != "off"
+
     cli::cli_inform("Discovering areas to process...")
 
     cli::cli_inform("  - Connecting to DuckDB...")
@@ -159,15 +369,7 @@ nvdb_to_pbf <- function(
     }
 
     # Apply filters
-    where_sql <- DBI::SQL("")
-    if (!is.null(municipality_codes)) {
-      where_sql <- glue::glue_sql("WHERE Kommu_141 IN ({municipality_codes*})", .con = con)
-    } else if (!is.null(county_codes)) {
-      like_exprs <- lapply(county_codes, function(x) {
-        glue::glue_sql("Kommu_141 LIKE {paste0(x, '%')}", .con = con)
-      })
-      where_sql <- glue::glue_sql("WHERE ({glue::glue_sql_collapse(like_exprs, sep = ' OR ')})", .con = con)
-    }
+    where_sql <- build_area_where_sql(con, municipality_codes, county_codes)
 
     query <- glue::glue_sql("SELECT DISTINCT {code_col} as area_code FROM {table_ref} {where_sql} ORDER BY area_code", 
                            .con = con)
@@ -235,6 +437,39 @@ nvdb_to_pbf <- function(
       )
     }
 
+    if (use_global_prepass) {
+      cli::cli_inform("Building global endpoint-node dictionary...")
+      global_prepass_dir <- tempfile(pattern = "nvdb_prepass_")
+      dir.create(global_prepass_dir, showWarnings = FALSE)
+
+      geometry_expr <- detect_prepass_geometry_expr(
+        con = con,
+        source_path = gdb_path,
+        is_geoparquet_source = is_geoparquet_source
+      )
+      dict_info <- build_global_node_prepass_dictionary(
+        con = con,
+        table_ref = table_ref,
+        where_sql = where_sql,
+        area_code_col = code_col,
+        geometry_expr = geometry_expr,
+        dict_dir = global_prepass_dir
+      )
+      global_node_dict_path <- dict_info$path
+
+      cli::cli_inform(
+        paste0(
+          "Global node dictionary: ",
+          format(dict_info$stats$n_total, big.mark = ","),
+          " unique endpoint keys, ",
+          format(dict_info$stats$n_shared, big.mark = ","),
+          " shared across areas (max ",
+          dict_info$stats$max_area_count,
+          " areas)"
+        )
+      )
+    }
+
     DBI::dbDisconnect(con)
     con <- NULL
 
@@ -246,10 +481,18 @@ nvdb_to_pbf <- function(
         node_id_start = (i - 1) * 10000000 + 1,
         way_id_start = (i - 1) * 10000000 + 1,
         source_file = if (presplit) source_files[[codes[i]]] else NULL,
-        split_by = split_by
+        split_by = split_by,
+        global_node_dict_path = global_node_dict_path
       )
     })
   } else {
+    if (global_node_prepass == "on") {
+      cli::cli_warn(
+        "global_node_prepass='on' is ignored when split_by='none'"
+      )
+    }
+    use_global_prepass <- FALSE
+
     # split_by == "none"
     codes <- "all"
     chunk_configs <- list(list(
@@ -257,7 +500,8 @@ nvdb_to_pbf <- function(
       node_id_start = 1,
       way_id_start = 1,
       source_file = NULL,
-      split_by = "none"
+      split_by = "none",
+      global_node_dict_path = NULL
     ))
     label <- "file"
   }
@@ -267,6 +511,7 @@ nvdb_to_pbf <- function(
   process_area <- function(cfg, main_gdb, mem_limit_gb, threads) {
     code <- cfg$code
     source_file <- cfg$source_file
+    dict_path <- cfg$global_node_dict_path
 
     # Determine which file to use
     if (!is.null(source_file)) {
@@ -292,6 +537,9 @@ nvdb_to_pbf <- function(
           simplify_method = simplify_method,
           node_id_start = cfg$node_id_start,
           way_id_start = cfg$way_id_start,
+          global_node_dict_path = dict_path,
+          area_code = if (!is.null(dict_path)) code else NULL,
+          prepass_rounding = "duckdb_1e7",
           duckdb_memory_limit_gb = mem_limit_gb,
           duckdb_threads = threads,
           verbose = FALSE
@@ -424,6 +672,26 @@ nvdb_to_pbf <- function(
         cli::cli_text("  {.code {f$code %||% 'unknown'}}: {err}")
       }
     }
+
+    if (use_global_prepass) {
+      failed_codes <- sapply(failed, function(x) {
+        if (is.list(x) && !is.null(x$code)) x$code else "unknown"
+      })
+      successful_files <- unlist(lapply(successful, function(x) x$file))
+      if (length(successful_files) > 0) {
+        unlink(successful_files[file.exists(successful_files)])
+      }
+      if (!is.null(temp_dir)) {
+        unlink(temp_dir, recursive = TRUE)
+      }
+      if (!is.null(global_prepass_dir)) {
+        unlink(global_prepass_dir, recursive = TRUE)
+      }
+      stop(
+        "Global node prepass requires all areas to succeed. Aborting due to failed areas: ",
+        paste(failed_codes, collapse = ", ")
+      )
+    }
   }
 
   cli::cli_inform("")
@@ -475,6 +743,9 @@ nvdb_to_pbf <- function(
   unlink(chunk_files)
   if (!is.null(temp_dir)) {
     unlink(temp_dir, recursive = TRUE)
+  }
+  if (!is.null(global_prepass_dir)) {
+    unlink(global_prepass_dir, recursive = TRUE)
   }
 
   # Final stats
