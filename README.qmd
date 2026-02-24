@@ -154,15 +154,15 @@ nvdb_to_pbf(
 ## Split Processing and Global Node Prepass
 
 When you process by `split_by = "municipality"` or `split_by = "county"`,
-the converter can build a global endpoint-node dictionary to keep node IDs
+the converter requires a global endpoint-node dictionary to keep node IDs
 consistent across split boundaries.
 
-- `global_node_prepass = "auto"` (default): enabled for split runs, disabled for `split_by = "none"`.
-- `global_node_prepass = "on"`: force the prepass for split runs.
-- `global_node_prepass = "off"`: disable the prepass.
+- `global_node_prepass = "auto"` (default): used for split runs; ignored for `split_by = "none"`.
+- `global_node_prepass = "on"`: explicit split-safe behavior.
+- `global_node_prepass = "off"`: invalid in split mode and fails fast.
 
-This is recommended for large split runs where cross-boundary routing
-connectivity matters.
+This prevents split-induced graph disconnections caused by duplicated
+boundary endpoint nodes.
 
 ```r
 nvdb_to_pbf(

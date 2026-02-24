@@ -240,7 +240,9 @@ build_global_node_prepass_dictionary <- function(
 #' @param split_by Strategy for splitting the work: "municipality" (default), "county", or "none" (process whole file in one go).
 #' @param use_geoparquet Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")
 #' @param global_node_prepass Whether to build a global endpoint-node dictionary before split processing.
-#'   One of "auto" (default; enabled for split mode), "on", or "off".
+#'   One of "auto" (default), "on", or "off".
+#'   For split processing (`split_by = "municipality"` or `"county"`), `"off"` is not allowed
+#'   and raises an error because split mode requires global node prepass for boundary-safe connectivity.
 #' @param presplit Logical: whether to pre-split to temp files (default: FALSE)
 #' @param max_retries Maximum retries for failed municipalities (default: 2)
 #' @param duckdb_memory_limit_gb Memory limit for DuckDB in GB (numeric). Default 4.
@@ -273,6 +275,21 @@ nvdb_to_pbf <- function(
 ) {
   split_by <- match.arg(split_by)
   global_node_prepass <- match.arg(global_node_prepass)
+
+  # Guardrail: split mode requires global prepass to avoid split-induced
+  # boundary node duplication and disconnected graph artifacts.
+  if (split_by != "none" && global_node_prepass == "off") {
+    stop(
+      "global_node_prepass='off' is not allowed when split_by='",
+      split_by,
+      "'. Split processing requires global node prepass."
+    )
+  }
+  if (split_by == "none" && global_node_prepass != "auto") {
+    cli::cli_warn(
+      "global_node_prepass='{global_node_prepass}' is ignored when split_by='none'"
+    )
+  }
 
   # --- Input Validation ---
   if (!is.character(input_path) || length(input_path) != 1) {
@@ -326,7 +343,7 @@ nvdb_to_pbf <- function(
   # --- 1. DISCOVERY ---
   temp_dir <- NULL
   if (split_by != "none") {
-    use_global_prepass <- global_node_prepass != "off"
+    use_global_prepass <- TRUE
 
     cli::cli_inform("Discovering areas to process...")
 
@@ -486,11 +503,6 @@ nvdb_to_pbf <- function(
       )
     })
   } else {
-    if (global_node_prepass == "on") {
-      cli::cli_warn(
-        "global_node_prepass='on' is ignored when split_by='none'"
-      )
-    }
     use_global_prepass <- FALSE
 
     # split_by == "none"

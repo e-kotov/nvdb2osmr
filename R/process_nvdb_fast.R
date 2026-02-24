@@ -10,6 +10,7 @@
 #' @param way_id_start Starting way ID for this chunk (default: 1)
 #' @param global_node_dict_path Optional path to global endpoint-node dictionary parquet.
 #'   If provided, per-segment start/end global node IDs are joined into the chunk.
+#'   Required when `municipality_code` or `county_code` is supplied.
 #' @param area_code Area code for this chunk (municipality or county code). Required
 #'   when \code{global_node_dict_path} is provided.
 #' @param prepass_rounding Rounding scheme for global node dictionary matching.
@@ -52,6 +53,14 @@ process_nvdb_fast <- function(gdb_path, output_pbf,
   valid_methods <- c("refname", "connected", "route")
   if (!simplify_method %in% valid_methods) {
     stop("simplify_method must be one of: ", paste(valid_methods, collapse = ", "))
+  }
+
+  split_like_call <- !is.null(municipality_code) || !is.null(county_code)
+  if (split_like_call && is.null(global_node_dict_path)) {
+    stop(
+      "global_node_dict_path is required when municipality_code or county_code is set. ",
+      "Split-like processing must use global node prepass."
+    )
   }
 
   if (!is.null(global_node_dict_path)) {

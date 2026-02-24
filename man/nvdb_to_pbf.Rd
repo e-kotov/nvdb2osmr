@@ -11,6 +11,7 @@ nvdb_to_pbf(
   county_codes = NULL,
   split_by = c("municipality", "county", "none"),
   use_geoparquet = "auto",
+  global_node_prepass = c("auto", "on", "off"),
   simplify_method = "refname",
   presplit = FALSE,
   max_retries = 2,
@@ -30,6 +31,11 @@ nvdb_to_pbf(
 \item{split_by}{Strategy for splitting the work: "municipality" (default), "county", or "none" (process whole file in one go).}
 
 \item{use_geoparquet}{Use GeoParquet for faster processing: "auto", TRUE, or FALSE (default: "auto")}
+
+\item{global_node_prepass}{Whether to build a global endpoint-node dictionary before split processing.
+One of "auto" (default), "on", or "off".
+For split processing (\code{split_by = "municipality"} or \code{"county"}), \code{"off"} is not allowed
+and raises an error because split mode requires global node prepass for boundary-safe connectivity.}
 
 \item{presplit}{Logical: whether to pre-split to temp files (default: FALSE)}
 

@@ -14,7 +14,10 @@ process_nvdb_fast(
   way_id_start = 1L,
   duckdb_memory_limit_gb = 4,
   duckdb_threads = 1,
-  verbose = TRUE
+  verbose = TRUE,
+  global_node_dict_path = NULL,
+  area_code = NULL,
+  prepass_rounding = "duckdb_1e7"
 )
 }
 \arguments{
@@ -38,6 +41,16 @@ Used if municipality_code is NULL.}
 \item{duckdb_threads}{Number of threads for DuckDB. Default 1.}
 
 \item{verbose}{Print progress messages (default: TRUE)}
+
+\item{global_node_dict_path}{Optional path to global endpoint-node dictionary parquet.
+If provided, per-segment start/end global node IDs are joined into the chunk.
+Required when \code{municipality_code} or \code{county_code} is supplied.}
+
+\item{area_code}{Area code for this chunk (municipality or county code). Required
+when \code{global_node_dict_path} is provided.}
+
+\item{prepass_rounding}{Rounding scheme for global node dictionary matching.
+Currently only \code{"duckdb_1e7"} is supported.}
 }
 \value{
 Path to output PBF file (invisibly)
