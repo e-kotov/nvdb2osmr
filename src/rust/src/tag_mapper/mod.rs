@@ -126,6 +126,9 @@ pub fn tag_network(segments: &mut [Segment]) {
         // Vehicle type restrictions (Python lines 781-845)
         map_vehicle_restrictions(segment);
 
+        // PSV lanes (Python lines 880-896)
+        map_psv_lanes(segment);
+
         // Hazmat (Python lines 846-860)
         map_hazmat(segment);
 
@@ -721,8 +724,12 @@ fn map_oneway(segment: &mut Segment) {
     } else if f_forbidden && !b_forbidden {
         // Forward direction forbidden → reverse geometry, traffic flows in original "backward" direction
         segment.geometry.0.reverse();
-        segment.start_node = hash_coord(segment.geometry.0.first().unwrap());
-        segment.end_node = hash_coord(segment.geometry.0.last().unwrap());
+        
+        // SWAP all node-related fields to maintain topological integrity (especially for municipality splits)
+        std::mem::swap(&mut segment.start_node, &mut segment.end_node);
+        std::mem::swap(&mut segment.global_start_node_id, &mut segment.global_end_node_id);
+        std::mem::swap(&mut segment.global_start_owned, &mut segment.global_end_owned);
+        
         segment.tags.insert("oneway".to_string(), "yes".to_string());
         segment.oneway_direction = OnewayDirection::Backward;
     }
@@ -863,7 +870,11 @@ fn map_bridge_tunnel(segment: &mut Segment, bridges: &FxHashMap<String, Bridge>)
                     let bridge_id = id_prop.as_string();
                     if let Some(bridge) = bridges.get(&bridge_id) {
                         segment.tags.insert("layer".to_string(), bridge.layer.clone());
+                    } else {
+                        segment.tags.insert("layer".to_string(), "1".to_string());
                     }
+                } else {
+                    segment.tags.insert("layer".to_string(), "1".to_string());
                 }
             }
             2 | 3 => {
@@ -1105,7 +1116,34 @@ fn map_lit(segment: &mut Segment) {
 fn map_motor_vehicle_access(segment: &mut Segment) {
     let f = segment.properties.get("F_ForbudTrafik").and_then(|v| v.as_i64());
     let b = segment.properties.get("B_ForbudTrafik").and_then(|v| v.as_i64());
-    tag_direction(&mut segment.tags, segment.oneway_direction, "motor_vehicle", Some("no"), f, b);
+    
+    // Only apply if Typ_512 is 40 (vehicle) or NULL
+    // If Typ_512 is 10 (car) or 20 (bus), we handle it in map_vehicle_restrictions
+    let f_typ = segment.properties.get("Typ_512").and_then(|v| v.as_i64()).unwrap_or(40);
+    let b_typ = segment.properties.get("Typ_369").and_then(|v| v.as_i64()).unwrap_or(40);
+
+    let f_val = if f_typ == 40 { f } else { None };
+    let b_val = if b_typ == 40 { b } else { None };
+
+    tag_direction(&mut segment.tags, segment.oneway_direction, "motor_vehicle", Some("no"), f_val, b_val);
+}
+
+/// Map PSV lanes — port from Python lines 880-896
+fn map_psv_lanes(segment: &mut Segment) {
+    // 2024 schema uses FPV_kollektivtrafik = -1 for bus lanes/routes
+    if let Some(prop) = segment.properties.get("FPV_kollektivtrafik").and_then(|v| v.as_i64()) {
+        if prop == -1 || prop == 1 {
+            // Apply psv=yes and motor_vehicle=no
+            // Usually psv lanes are directional, but FPV_kollektivtrafik seems to be a general flag here
+            // We use tag_direction to be safe with oneway semantics if we had F/B columns, 
+            // but since we only have one column, we apply to both directions of flow.
+            segment.tags.insert("psv".to_string(), "yes".to_string());
+            
+            // Only insert motor_vehicle=no if it doesn't conflict with existing tags or is appropriate
+            // Python does it unconditionally for PSV lanes
+            segment.tags.insert("motor_vehicle".to_string(), "no".to_string());
+        }
+    }
 }
 
 /// Map hazmat tags (Python lines 846-860)
@@ -1217,15 +1255,26 @@ fn map_vehicle_restrictions(segment: &mut Segment) {
     let mut restrictions: Vec<VehicleRestriction> = Vec::new();
 
     for is_forward in [true, false] {
-        let gallar_key = if is_forward { "F_Gallar_135" } else { "B_Gallar_135" };
+        let forbud_key = if is_forward { "F_ForbudTrafik" } else { "B_ForbudTrafik" };
+        let typ_key = if is_forward { "Typ_512" } else { "Typ_369" };
+        // Weight limit column F_Hogst_24 is already handled above for maxweight,
+        // but Gäller fordon might have a specific weight limit F_Total_136 in some schemas.
+        // In 2024 schema, we only see Typ_512 for now.
         let total_key = if is_forward { "F_Total_136" } else { "B_Total_136" };
 
-        if let Some(vehicle_type) = segment.properties.get(gallar_key).and_then(|v| v.as_i64()) {
-            if let Some(&osm_tag) = vehicle_type_map.get(&vehicle_type) {
-                let weight_limit = segment.properties.get(total_key)
-                    .and_then(|v| v.as_f64())
-                    .filter(|&w| w > 0.0);
-                restrictions.push(VehicleRestriction { is_forward, osm_tag, weight_limit });
+        if let Some(forbud) = segment.properties.get(forbud_key).and_then(|v| v.as_i64()) {
+            if forbud == -1 || forbud == 1 {
+                if let Some(vehicle_type) = segment.properties.get(typ_key).and_then(|v| v.as_i64()) {
+                    if let Some(&osm_tag) = vehicle_type_map.get(&vehicle_type) {
+                        // Skip if it is "vehicle" since that is handled in map_motor_vehicle_access
+                        if osm_tag != "vehicle" {
+                            let weight_limit = segment.properties.get(total_key)
+                                .and_then(|v| v.as_f64())
+                                .filter(|&w| w > 0.0);
+                            restrictions.push(VehicleRestriction { is_forward, osm_tag, weight_limit });
+                        }
+                    }
+                }
             }
         }
     }

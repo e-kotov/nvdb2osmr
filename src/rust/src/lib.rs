@@ -154,7 +154,12 @@ fn is_boolean_field(name: &str) -> bool {
         "C_Rekbilvagcykeltrafik" |
         "Rastplats" |
         "L_Rastficka_2" | "R_Rastficka_2" |
-        "F_ATK_Matplats" | "B_ATK_Matplats"
+        "F_ATK_Matplats" | "B_ATK_Matplats" |
+        "Provisorisk_vag" | "F_Stigningsfalt" | "B_Stigningsfalt" |
+        "Katastrofoverfart" | "Viltpassage_i_plan" |
+        "L_Viltuthopp" | "R_Viltuthopp" |
+        "L_P_ficka" | "R_P_ficka" | "M_P_ficka" |
+        "Driftvandplats_2" | "Brunn___Slamsugning" | "Hallplats"
     )
 }
 

@@ -12,6 +12,11 @@ experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](h
 status](https://www.r-pkg.org/badges/version/nvdb2osmr.png)](https://CRAN.R-project.org/package=nvdb2osmr)
 <!-- badges: end -->
 
+**WARNING (in case you did not notice the experimental badge above):
+this is highly experimental and can break at any moment until further
+notice. This is still work in progress and not yet ready for production
+use. Use at your own risk.**
+
 The goal of nvdb2osmr is to convert Swedish NVDB (Nationell VägDataBas)
 road network data into OpenStreetMap (OSM) format. It provides
 high-performance tools using DuckDB for spatial I/O and Rust for

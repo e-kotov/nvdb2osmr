@@ -20,6 +20,8 @@ knitr::opts_chunk$set(
 [![CRAN status](https://www.r-pkg.org/badges/version/nvdb2osmr)](https://CRAN.R-project.org/package=nvdb2osmr)
 <!-- badges: end -->
 
+**WARNING (in case you did not notice the experimental badge above): this is highly experimental and can break at any moment until further notice. This is still work in progress and not yet ready for production use. Use at your own risk.**
+
 The goal of nvdb2osmr is to convert Swedish NVDB (Nationell VägDataBas) road network data into OpenStreetMap (OSM) format. It provides high-performance tools using DuckDB for spatial I/O and Rust for topological simplification, enabling efficient processing of large road network datasets.
 
 This R package is based on the [nvdb2osm](https://github.com/NKAmapper/nvdb2osm) Python script by [NKAmapper](https://github.com/NKAmapper), licensed under [CC0-1.0](https://creativecommons.org/publicdomain/zero/1.0/).
